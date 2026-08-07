@@ -283,4 +283,4 @@ async def test_human_decision_schema_preserves_fingerprint_and_lineage(
         "LIKE '%supersedes_decision_id%'"
     )
     assert constraint is not None
-    assert constraint["confdeltype"] == "r"
+    assert constraint["confdeltype"] == b"r"
