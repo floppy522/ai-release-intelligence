@@ -22,6 +22,7 @@ class EvidenceRef:
 class ReleaseSnapshot:
     release_name: str
     issue_number: str
+    milestone_number: int
     issue_labels: tuple[str, ...]
     linked_pr_numbers: tuple[str, ...]
     issue_evidence: EvidenceRef

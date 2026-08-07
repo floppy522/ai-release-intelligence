@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -38,9 +41,14 @@ from release_intelligence.ports.repositories import (
 class AnalysisRepository:
     """PostgreSQL-backed storage for append-only release analysis runs."""
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
         self._sessions = async_sessionmaker(self._engine, expire_on_commit=False)
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     async def close(self) -> None:
         """Release pooled asyncpg connections before the owning event loop closes."""
@@ -57,48 +65,60 @@ class AnalysisRepository:
     ) -> UUID:
         self._validate_run(findings, assessment, policy_version, source_fetched_at)
 
-        async with self._sessions() as session:
-            async with session.begin():
-                release = await self._release_for_snapshot(session, snapshot, policy_version)
-                run = AnalysisRunRow(
-                    release=release,
-                    policy_version=policy_version,
-                    source_fetched_at=source_fetched_at,
-                    state="COMPLETED",
-                    assessment_status=assessment.status.value,
-                    completed_at=source_fetched_at,
-                )
-                session.add(run)
-                await session.flush()
-                session.add(
-                    ReleaseSnapshotRow(
-                        analysis_run=run,
-                        payload=self._snapshot_payload(snapshot),
+        completed_at = self._completed_at()
+        snapshot_persisted = False
+        try:
+            async with self._sessions() as session:
+                async with session.begin():
+                    release = await self._release_for_snapshot(
+                        session, snapshot, policy_version
                     )
-                )
-                for finding_position, finding in enumerate(findings):
-                    finding_row = ReadinessFindingRow(
-                        analysis_run=run,
-                        position=finding_position,
-                        rule_id=finding.rule_id,
-                        severity=finding.severity,
-                        summary=finding.summary,
-                        required_action=finding.required_action,
+                    run = AnalysisRunRow(
+                        release_id=release.id,
+                        policy_version=policy_version,
+                        source_fetched_at=source_fetched_at,
+                        state="COMPLETED",
+                        assessment_status=assessment.status.value,
+                        started_at=completed_at,
+                        completed_at=completed_at,
                     )
-                    session.add(finding_row)
-                    for evidence_position, evidence in enumerate(finding.evidence):
-                        session.add(
-                            FindingEvidenceRow(
-                                finding=finding_row,
-                                position=evidence_position,
-                                evidence_id=evidence.evidence_id,
-                                source_type=evidence.source_type,
-                                source_id=evidence.source_id,
-                                url=evidence.url,
-                                fingerprint=evidence.fingerprint,
-                            )
+                    session.add(run)
+                    await session.flush()
+                    session.add(
+                        ReleaseSnapshotRow(
+                            analysis_run=run,
+                            payload=self._snapshot_payload(snapshot),
                         )
-            return run.id
+                    )
+                    await session.flush()
+                    snapshot_persisted = True
+                    for finding_position, finding in enumerate(findings):
+                        finding_row = ReadinessFindingRow(
+                            analysis_run=run,
+                            position=finding_position,
+                            rule_id=finding.rule_id,
+                            severity=finding.severity,
+                            summary=finding.summary,
+                            required_action=finding.required_action,
+                        )
+                        session.add(finding_row)
+                        for evidence_position, evidence in enumerate(finding.evidence):
+                            session.add(
+                                FindingEvidenceRow(
+                                    finding=finding_row,
+                                    position=evidence_position,
+                                    evidence_id=evidence.evidence_id,
+                                    source_type=evidence.source_type,
+                                    source_id=evidence.source_id,
+                                    url=evidence.url,
+                                    fingerprint=evidence.fingerprint,
+                                )
+                            )
+                return run.id
+        except SQLAlchemyError:
+            if not snapshot_persisted:
+                await self._record_failed_run(snapshot, policy_version, source_fetched_at)
+            raise
 
     async def get_run(self, run_id: UUID) -> StoredAnalysisRun:
         statement = (
@@ -122,7 +142,7 @@ class AnalysisRepository:
             snapshot=self._snapshot_from_payload(run.snapshot.payload),
             findings=findings,
             assessment=ReadinessAssessment(
-                status=ReleaseStatus(run.assessment_status), findings=findings
+                status=ReleaseStatus(self._assessment_status(run)), findings=findings
             ),
             policy_version=run.policy_version,
             source_fetched_at=run.source_fetched_at,
@@ -138,46 +158,75 @@ class AnalysisRepository:
         snapshot: ReleaseSnapshot,
         policy_version: str,
     ) -> ReleaseRow:
-        repository = await session.scalar(
-            select(RepositoryConnectionRow).where(
-                RepositoryConnectionRow.provider == "fixture",
-                RepositoryConnectionRow.external_repository_id
-                == "example/release-intelligence",
-            )
-        )
-        if repository is None:
-            repository = RepositoryConnectionRow(
+        await session.execute(
+            insert(RepositoryConnectionRow)
+            .values(
                 provider="fixture",
                 external_repository_id="example/release-intelligence",
                 full_name="example/release-intelligence",
             )
-            session.add(repository)
-            await session.flush()
-
-        policy = await session.scalar(
-            select(ReleasePolicyRow).where(
-                ReleasePolicyRow.repository_id == repository.id,
-                ReleasePolicyRow.version == policy_version,
-            )
+            .on_conflict_do_nothing(constraint="uq_repository_identity")
         )
-        if policy is None:
-            session.add(ReleasePolicyRow(repository=repository, version=policy_version))
-
-        milestone_number = self._milestone_number(snapshot.issue_number)
-        release = await session.scalar(
-            select(ReleaseRow).where(
-                ReleaseRow.repository_id == repository.id,
-                ReleaseRow.github_milestone_number == milestone_number,
+        repository = await session.scalar(
+            select(RepositoryConnectionRow)
+            .where(
+                RepositoryConnectionRow.provider == "fixture",
+                RepositoryConnectionRow.external_repository_id
+                == "example/release-intelligence",
             )
+            .order_by(RepositoryConnectionRow.id)
         )
-        if release is None:
-            release = ReleaseRow(
-                repository=repository,
+        if repository is None:
+            raise RuntimeError("repository identity was not persisted")
+
+        await session.execute(
+            insert(ReleasePolicyRow)
+            .values(repository_id=repository.id, version=policy_version)
+            .on_conflict_do_nothing(constraint="uq_release_policy_version")
+        )
+
+        milestone_number = snapshot.milestone_number
+        await session.execute(
+            insert(ReleaseRow)
+            .values(
+                repository_id=repository.id,
                 github_milestone_number=milestone_number,
                 name=snapshot.release_name,
             )
-            session.add(release)
+            .on_conflict_do_nothing(constraint="uq_release_repository_milestone")
+        )
+        release = await session.scalar(
+            select(ReleaseRow)
+            .where(
+                ReleaseRow.repository_id == repository.id,
+                ReleaseRow.github_milestone_number == milestone_number,
+            )
+            .order_by(ReleaseRow.id)
+        )
+        if release is None:
+            raise RuntimeError("release identity was not persisted")
         return release
+
+    async def _record_failed_run(
+        self,
+        snapshot: ReleaseSnapshot,
+        policy_version: str,
+        source_fetched_at: datetime,
+    ) -> None:
+        completed_at = self._completed_at()
+        async with self._sessions() as session, session.begin():
+            release = await self._release_for_snapshot(session, snapshot, policy_version)
+            session.add(
+                AnalysisRunRow(
+                    release_id=release.id,
+                    policy_version=policy_version,
+                    source_fetched_at=source_fetched_at,
+                    state="FAILED",
+                    assessment_status=None,
+                    started_at=completed_at,
+                    completed_at=completed_at,
+                )
+            )
 
     @staticmethod
     def _validate_run(
@@ -195,18 +244,24 @@ class AnalysisRepository:
         if any(not finding.evidence for finding in findings):
             raise ValueError("each readiness finding requires evidence")
 
+    def _completed_at(self) -> datetime:
+        completed_at = self._clock()
+        if completed_at.tzinfo is None:
+            raise ValueError("clock must return a timezone-aware datetime")
+        return completed_at.astimezone(UTC)
+
     @staticmethod
-    def _milestone_number(issue_number: str) -> int:
-        try:
-            return int(issue_number)
-        except ValueError as error:
-            raise ValueError("release issue_number must be numeric") from error
+    def _assessment_status(run: AnalysisRunRow) -> str:
+        if run.assessment_status is None:
+            raise ValueError("failed analysis runs do not have an assessment")
+        return run.assessment_status
 
     @staticmethod
     def _snapshot_payload(snapshot: ReleaseSnapshot) -> dict[str, object]:
         return {
             "release_name": snapshot.release_name,
             "issue_number": snapshot.issue_number,
+            "milestone_number": snapshot.milestone_number,
             "issue_labels": list(snapshot.issue_labels),
             "linked_pr_numbers": list(snapshot.linked_pr_numbers),
             "issue_evidence": {
@@ -224,6 +279,7 @@ class AnalysisRepository:
         return ReleaseSnapshot(
             release_name=cast(str, payload["release_name"]),
             issue_number=cast(str, payload["issue_number"]),
+            milestone_number=cast(int, payload["milestone_number"]),
             issue_labels=tuple(cast(list[str], payload["issue_labels"])),
             linked_pr_numbers=tuple(cast(list[str], payload["linked_pr_numbers"])),
             issue_evidence=EvidenceRef(**evidence_payload),

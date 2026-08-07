@@ -69,7 +69,7 @@ def upgrade() -> None:
         sa.Column("policy_version", sa.String(length=128), nullable=False),
         sa.Column("source_fetched_at", timestamp, nullable=False),
         sa.Column("state", sa.String(length=32), nullable=False),
-        sa.Column("assessment_status", sa.String(length=32), nullable=False),
+        sa.Column("assessment_status", sa.String(length=32), nullable=True),
         sa.Column(
             "started_at", timestamp, nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")
         ),
@@ -119,6 +119,8 @@ def upgrade() -> None:
         sa.Column("id", uuid, primary_key=True, nullable=False),
         sa.Column("analysis_run_id", uuid, nullable=False),
         sa.Column("finding_id", uuid, nullable=True),
+        sa.Column("fingerprint", sa.String(length=255), nullable=False),
+        sa.Column("supersedes_decision_id", uuid, nullable=True),
         sa.Column("decision", sa.String(length=32), nullable=False),
         sa.Column("reason", sa.Text(), nullable=False),
         sa.Column("actor_id", sa.String(length=255), nullable=False),
@@ -127,6 +129,9 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(["analysis_run_id"], ["analysis_runs.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["finding_id"], ["readiness_findings.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(
+            ["supersedes_decision_id"], ["human_decisions.id"], ondelete="RESTRICT"
+        ),
     )
     op.create_table(
         "ai_explanations",
