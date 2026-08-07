@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Hashable, Mapping
+from collections.abc import Callable, Hashable
 from dataclasses import replace
 from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from typing import Self, TypeVar
 from urllib.parse import (
     SplitResult,
@@ -29,6 +28,10 @@ from release_intelligence.adapters.github.mapper import (
     map_pull_request,
     map_timeline_event,
 )
+from release_intelligence.adapters.github.rate_limits import (
+    secondary_rate_limit,
+    valid_retry_after,
+)
 from release_intelligence.ports.github import (
     CommitComparison,
     GitHubCheck,
@@ -50,10 +53,6 @@ QueryValue = str | int | float | bool | None
 MAX_PAGES = 20
 API_VERSION = "2022-11-28"
 API_BASE_URL = "https://api.github.com"
-SECONDARY_RATE_LIMIT_PHRASES = (
-    "secondary rate limit",
-    "abuse detection mechanism",
-)
 
 
 class GitHubRestClient:
@@ -329,7 +328,7 @@ class GitHubRestClient:
         if status_code == 429:
             raise GitHubRateLimited(self.rate_limit.reset_at)
         if status_code == 403:
-            if self.rate_limit.remaining == 0 or self._valid_retry_after(
+            if self.rate_limit.remaining == 0 or valid_retry_after(
                 response.headers.get("Retry-After")
             ) or self._has_secondary_rate_limit_message(response):
                 raise GitHubRateLimited(self.rate_limit.reset_at)
@@ -366,31 +365,13 @@ class GitHubRestClient:
             return None
 
     @staticmethod
-    def _valid_retry_after(value: str | None) -> bool:
-        if value is None:
-            return False
-        if value.isascii() and value.isdigit():
-            return True
-        try:
-            parsed = parsedate_to_datetime(value)
-        except (TypeError, ValueError, OverflowError):
-            return False
-        return parsed.tzinfo is not None
-
-    @staticmethod
     def _has_secondary_rate_limit_message(response: httpx.Response) -> bool:
         payload: object | None = None
         try:
             payload = response.json()
         except (TypeError, ValueError):
             return False
-        if not isinstance(payload, Mapping):
-            return False
-        message = payload.get("message")
-        if not isinstance(message, str):
-            return False
-        normalized = " ".join(message.casefold().split())
-        return any(phrase in normalized for phrase in SECONDARY_RATE_LIMIT_PHRASES)
+        return secondary_rate_limit(payload)
 
     def _next_link(self, response: httpx.Response) -> str | None:
         try:

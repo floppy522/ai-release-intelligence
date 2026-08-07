@@ -15,6 +15,7 @@ from release_intelligence.domain.models import (
     ReleaseLink,
     ReleaseSnapshot,
     ReleaseStatus,
+    SnapshotVersion,
     SourceError,
 )
 from release_intelligence.ports.github import (
@@ -198,8 +199,13 @@ class GitHubReleaseLoader:
 
     async def _collect_window(self, request: AnalysisRequest) -> _EvidenceWindow:
         milestone = await self._get_milestone(request)
-        items = await self._source.list_milestone_items(
-            request.repository, request.milestone_number
+        items = tuple(
+            sorted(
+                await self._source.list_milestone_items(
+                    request.repository, request.milestone_number
+                ),
+                key=lambda item: (item.kind.value, item.source_id, item.number),
+            )
         )
         if len(items) > MAX_MILESTONE_ITEMS:
             raise GitHubPartialData()
@@ -244,20 +250,29 @@ class GitHubReleaseLoader:
                 if len(pull_numbers) > MAX_RELATED_PULL_REQUESTS:
                     raise GitHubPartialData()
         pulls = tuple(
-            [
+            sorted(
+                [
                 await self._source.get_pull_request(request.repository, number)
                 for number in sorted(pull_numbers)
-            ]
+                ],
+                key=lambda pull: (pull.source_id, pull.number),
+            )
         )
-        checks = await self._source.list_checks_for_ref(
-            request.repository, candidate_sha
+        checks = tuple(
+            sorted(
+                await self._source.list_checks_for_ref(
+                    request.repository, candidate_sha
+                ),
+                key=lambda check: (check.run_id, check.source_id),
+            )
         )
         if len(checks) > MAX_CANDIDATE_CHECKS or any(
             check.head_sha != candidate_sha for check in checks
         ):
             raise GitHubPartialData()
         comparisons = tuple(
-            [
+            sorted(
+                [
                 PullRequestComparison(
                     pull_request_number=pull.number,
                     comparison=await self._source.compare_commits(
@@ -266,14 +281,26 @@ class GitHubReleaseLoader:
                 )
                 for pull in pulls
                 if pull.merge_commit_sha is not None
-            ]
+                ],
+                key=lambda comparison: comparison.pull_request_number,
+            )
         )
 
         return _EvidenceWindow(
             milestone=milestone,
             items=items,
             candidate_sha=candidate_sha,
-            links=tuple(links),
+            links=tuple(
+                sorted(
+                    links,
+                    key=lambda link: (
+                        link.issue_number,
+                        link.pull_request_number,
+                        link.url,
+                        link.source_id,
+                    ),
+                )
+            ),
             pull_requests=pulls,
             checks=checks,
             comparisons=comparisons,
@@ -300,7 +327,7 @@ class GitHubReleaseLoader:
             issue_labels=issue_item.labels if issue_item is not None else (),
             linked_pr_numbers=linked,
             issue_evidence=self._issue_evidence(issue_item),
-            snapshot_version="github-v1",
+            snapshot_version=SnapshotVersion.GITHUB_V1,
             repository_id=request.repository_id,
             repository_full_name=(
                 f"{request.repository.owner}/{request.repository.name}"
@@ -390,7 +417,7 @@ def _unavailable_snapshot(
             ),
             fingerprint=f"github:milestone:{request.milestone_number}:unavailable",
         ),
-        snapshot_version="github-v1",
+        snapshot_version=SnapshotVersion.GITHUB_V1,
         repository_id=request.repository_id,
         repository_full_name=(
             f"{request.repository.owner}/{request.repository.name}"
@@ -416,8 +443,31 @@ def assess(
     now: datetime,
 ) -> ReadinessAssessment:
     del policy, decisions
-    if snapshot.snapshot_version == "legacy":
-        return assess_release(snapshot)
+    if snapshot.snapshot_version is SnapshotVersion.LEGACY:
+        trusted_legacy_fixture = (
+            snapshot.repository_id == "fixture:demo"
+            and snapshot.repository_full_name == "example/release-demo"
+            and snapshot.complete
+            and not snapshot.source_errors
+            and snapshot.fetch_started_at is None
+            and snapshot.fetched_at is None
+            and not snapshot.candidate_ref
+            and not snapshot.candidate_sha
+            and not snapshot.items
+            and not snapshot.links
+            and not snapshot.pull_requests
+            and not snapshot.checks
+            and not snapshot.comparisons
+        )
+        if trusted_legacy_fixture:
+            return assess_release(snapshot)
+        return ReadinessAssessment(
+            status=ReleaseStatus.INSUFFICIENT_DATA, findings=()
+        )
+    if snapshot.snapshot_version is not SnapshotVersion.GITHUB_V1:
+        return ReadinessAssessment(
+            status=ReleaseStatus.INSUFFICIENT_DATA, findings=()
+        )
     if now.tzinfo is None:
         return ReadinessAssessment(
             status=ReleaseStatus.INSUFFICIENT_DATA, findings=()

@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from pydantic import SecretStr
 
+from release_intelligence.adapters.github.rate_limits import is_rate_limited, reset_at
 from release_intelligence.ports.github import (
     GitHubHttpClient,
     GitHubPartialData,
@@ -103,19 +104,15 @@ class GitHubAppTokenProvider:
             token = response.json().get("token")
         except httpx.HTTPStatusError as error:
             error_response = error.response
-            remaining = error_response.headers.get("X-RateLimit-Remaining")
-            if error_response.status_code == 429 or remaining == "0":
-                reset_at: datetime | None = None
-                raw_reset = error_response.headers.get("X-RateLimit-Reset")
-                try:
-                    reset_at = (
-                        datetime.fromtimestamp(int(raw_reset), UTC)
-                        if raw_reset is not None
-                        else None
-                    )
-                except (ValueError, OverflowError, OSError):
-                    reset_at = None
-                raise GitHubRateLimited(reset_at) from None
+            payload: object = None
+            try:
+                payload = error_response.json()
+            except (TypeError, ValueError):
+                payload = None
+            if is_rate_limited(
+                error_response.status_code, error_response.headers, payload
+            ):
+                raise GitHubRateLimited(reset_at(error_response.headers)) from None
             if error_response.status_code in (401, 403, 404):
                 raise GitHubUnauthorized() from None
             raise GitHubPartialData() from None

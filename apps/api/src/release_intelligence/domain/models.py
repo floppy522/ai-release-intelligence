@@ -17,6 +17,11 @@ class ReleaseStatus(StrEnum):
     INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
 
 
+class SnapshotVersion(StrEnum):
+    LEGACY = "legacy"
+    GITHUB_V1 = "github-v1"
+
+
 @dataclass(frozen=True)
 class EvidenceRef:
     evidence_id: str
@@ -56,7 +61,7 @@ class ReleaseSnapshot:
     issue_labels: tuple[str, ...]
     linked_pr_numbers: tuple[str, ...]
     issue_evidence: EvidenceRef
-    snapshot_version: str = "legacy"
+    snapshot_version: SnapshotVersion = SnapshotVersion.LEGACY
     repository_id: str = "fixture"
     repository_full_name: str = "example/release-intelligence"
     fetch_started_at: datetime | None = None

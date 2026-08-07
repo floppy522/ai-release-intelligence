@@ -76,12 +76,20 @@ def _decode_segment(segment: str) -> dict[str, object]:
 
 
 def _status_error(
-    status_code: int, *, headers: dict[str, str] | None = None
+    status_code: int,
+    *,
+    headers: dict[str, str] | None = None,
+    payload: object | None = None,
 ) -> httpx.HTTPStatusError:
     request = httpx.Request(
         "POST", "https://github.com/login/oauth/access_token?code=secret-code"
     )
-    response = httpx.Response(status_code, request=request, headers=headers)
+    response = httpx.Response(
+        status_code,
+        request=request,
+        headers=headers,
+        json={} if payload is None else payload,
+    )
     return httpx.HTTPStatusError("secret-code", request=request, response=response)
 
 
@@ -198,6 +206,82 @@ async def test_installation_token_preserves_rate_limit_reset(
         await provider.installation_token(123)
 
     assert raised.value.reset_at == datetime.fromtimestamp(reset, UTC)
+
+
+@pytest.mark.parametrize(
+    ("headers", "payload"),
+    [
+        ({"Retry-After": "60"}, {"message": "permission detail"}),
+        (
+            {},
+            {
+                "message": (
+                    "You have exceeded a secondary rate limit. "
+                    "Please wait before retrying."
+                )
+            },
+        ),
+    ],
+)
+async def test_installation_token_403_accepts_only_strict_rate_signals(
+    private_key: SecretStr,
+    headers: dict[str, str],
+    payload: object,
+) -> None:
+    client = FakeGitHubClient()
+    client.response = FakeResponse(
+        {}, _status_error(403, headers=headers, payload=payload)
+    )
+    provider = GitHubAppTokenProvider(
+        app_id="4242", private_key=private_key, client=client
+    )
+
+    with pytest.raises(GitHubRateLimited):
+        await provider.installation_token(123)
+
+
+@pytest.mark.parametrize(
+    ("headers", "payload"),
+    [
+        ({}, {"message": "Resource not accessible by integration"}),
+        ({"Retry-After": "eventually"}, {"message": 403}),
+        (
+            {"X-RateLimit-Reset": "bad"},
+            {"message": "This is not a secondary rate limit response"},
+        ),
+        ({}, ["secondary rate limit"]),
+    ],
+)
+async def test_installation_token_ordinary_or_malformed_403_is_unauthorized(
+    private_key: SecretStr,
+    headers: dict[str, str],
+    payload: object,
+) -> None:
+    client = FakeGitHubClient()
+    client.response = FakeResponse(
+        {}, _status_error(403, headers=headers, payload=payload)
+    )
+    provider = GitHubAppTokenProvider(
+        app_id="4242", private_key=private_key, client=client
+    )
+
+    with pytest.raises(GitHubUnauthorized):
+        await provider.installation_token(123)
+
+
+async def test_installation_token_401_is_not_reclassified_by_retry_header(
+    private_key: SecretStr,
+) -> None:
+    client = FakeGitHubClient()
+    client.response = FakeResponse(
+        {}, _status_error(401, headers={"Retry-After": "60"})
+    )
+    provider = GitHubAppTokenProvider(
+        app_id="4242", private_key=private_key, client=client
+    )
+
+    with pytest.raises(GitHubUnauthorized):
+        await provider.installation_token(123)
 
 
 @pytest.mark.parametrize(

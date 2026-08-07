@@ -16,4 +16,6 @@ def load_demo_release() -> ReleaseSnapshot:
         issue_labels=("code-change",),
         linked_pr_numbers=(),
         issue_evidence=issue_evidence,
+        repository_id="fixture:demo",
+        repository_full_name="example/release-demo",
     )

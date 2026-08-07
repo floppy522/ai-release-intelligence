@@ -22,6 +22,7 @@ from release_intelligence.application.analyze_release import (
 from release_intelligence.domain.models import (
     EvidenceRef,
     ReleaseSnapshot,
+    SnapshotVersion,
     SourceError,
 )
 from release_intelligence.main import create_app
@@ -55,7 +56,7 @@ def snapshot(
             url="https://github.com/example/release-intelligence/milestone/7",
             fingerprint="github:milestone:7:2026-08-07T14:30:00Z",
         ),
-        snapshot_version="github-v1",
+        snapshot_version=SnapshotVersion.GITHUB_V1,
         repository_id=REPOSITORY_ID,
         repository_full_name="example/release-intelligence",
         fetch_started_at=NOW,

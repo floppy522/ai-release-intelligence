@@ -669,6 +669,7 @@ async def test_secondary_rate_limit_message_without_headers_is_rate_limited() ->
         {"message": 403},
         ["secondary rate limit"],
         {"message": "Resource not accessible by integration"},
+        {"message": "This is not a secondary rate limit response"},
     ],
 )
 async def test_403_without_safe_rate_signal_is_unauthorized(payload: object) -> None:

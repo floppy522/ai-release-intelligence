@@ -5,7 +5,9 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 
+from release_intelligence.adapters.fixtures.github_source import load_demo_release
 from release_intelligence.adapters.persistence.repositories import AnalysisRepository
 from release_intelligence.application.analyze_release import (
     AnalysisRequest,
@@ -327,6 +329,26 @@ async def test_loader_retries_whole_material_window_then_uses_stable_evidence() 
     assert source.calls["checks"] == 4
 
 
+async def test_reordered_identical_set_like_evidence_is_one_stable_window() -> None:
+    source = FakeSource()
+    second = replace(
+        check(),
+        source_id="2",
+        run_id=2,
+        name="security",
+        url="https://github.com/example/release-intelligence/actions/runs/2",
+    )
+    forward = (check(), second)
+    reverse = tuple(reversed(forward))
+    source.check_sets = [forward, reverse, forward, reverse]
+
+    loaded = await GitHubReleaseLoader(source, clock=lambda: NOW).load(REQUEST)
+
+    assert loaded.complete is True
+    assert [item.run_id for item in loaded.checks] == [1, 2]
+    assert source.calls["checks"] == 2
+
+
 async def test_loader_fails_closed_before_expanding_oversized_milestone() -> None:
     source = FakeSource()
     source.item_sets[0] = tuple(issue() for _ in range(101))
@@ -422,6 +444,31 @@ async def test_normalized_snapshot_metadata_contradictions_fail_closed(corrupt) 
     assessment = assess(corrupt(complete), policy=None, decisions=(), now=NOW)
 
     assert assessment.status is ReleaseStatus.INSUFFICIENT_DATA
+
+
+def test_unknown_future_snapshot_version_is_rejected_at_deserialization() -> None:
+    payload = AnalysisRepository._snapshot_payload(load_demo_release())
+    payload["snapshot_version"] = "github-v2"
+
+    with pytest.raises(ValidationError):
+        AnalysisRepository._snapshot_from_payload(payload)
+
+
+@pytest.mark.parametrize(
+    "forged",
+    [
+        replace(load_demo_release(), repository_id="attacker/repository"),
+        replace(
+            load_demo_release(),
+            source_errors=(SourceError(code="github.partial_data", message="partial"),),
+        ),
+        replace(load_demo_release(), fetched_at=NOW, candidate_sha="forged"),
+    ],
+)
+def test_legacy_exemption_is_limited_to_the_trusted_fixture_boundary(forged) -> None:
+    result = assess(forged, policy=None, decisions=(), now=NOW)
+
+    assert result.status is ReleaseStatus.INSUFFICIENT_DATA
 
 
 @pytest.mark.parametrize(
