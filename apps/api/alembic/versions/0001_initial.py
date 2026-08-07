@@ -23,13 +23,68 @@ def upgrade() -> None:
     timestamp = sa.DateTime(timezone=True)
 
     op.create_table(
+        "users",
+        sa.Column("id", uuid, primary_key=True, nullable=False),
+        sa.Column("provider", sa.String(length=32), nullable=False),
+        sa.Column("external_user_id", sa.String(length=255), nullable=False),
+        sa.Column("login", sa.String(length=255), nullable=False),
+        sa.Column(
+            "created_at", timestamp, nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")
+        ),
+        sa.UniqueConstraint("provider", "external_user_id", name="uq_user_identity"),
+    )
+    op.create_table(
+        "encrypted_user_credentials",
+        sa.Column("user_id", uuid, primary_key=True, nullable=False),
+        sa.Column("encrypted_token", sa.Text(), nullable=False),
+        sa.Column(
+            "updated_at", timestamp, nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")
+        ),
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+    )
+    op.create_table(
+        "github_installations",
+        sa.Column("id", uuid, primary_key=True, nullable=False),
+        sa.Column("external_installation_id", sa.BigInteger(), nullable=False),
+        sa.Column(
+            "created_at", timestamp, nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")
+        ),
+        sa.UniqueConstraint("external_installation_id"),
+    )
+    op.create_table(
+        "user_installation_access",
+        sa.Column("user_id", uuid, primary_key=True, nullable=False),
+        sa.Column("installation_id", uuid, primary_key=True, nullable=False),
+        sa.Column(
+            "created_at", timestamp, nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")
+        ),
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["installation_id"], ["github_installations.id"], ondelete="CASCADE"
+        ),
+    )
+    op.create_table(
+        "oauth_states",
+        sa.Column("id", uuid, primary_key=True, nullable=False),
+        sa.Column("state_hash", sa.String(length=64), nullable=False),
+        sa.Column("expires_at", timestamp, nullable=False),
+        sa.Column(
+            "created_at", timestamp, nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")
+        ),
+        sa.UniqueConstraint("state_hash"),
+    )
+    op.create_table(
         "repository_connections",
         sa.Column("id", uuid, primary_key=True, nullable=False),
+        sa.Column("installation_id", uuid, nullable=True),
         sa.Column("provider", sa.String(length=32), nullable=False),
         sa.Column("external_repository_id", sa.String(length=255), nullable=False),
         sa.Column("full_name", sa.String(length=255), nullable=False),
         sa.Column(
             "created_at", timestamp, nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")
+        ),
+        sa.ForeignKeyConstraint(
+            ["installation_id"], ["github_installations.id"], ondelete="CASCADE"
         ),
         sa.UniqueConstraint("provider", "external_repository_id", name="uq_repository_identity"),
     )
@@ -147,15 +202,14 @@ def upgrade() -> None:
     op.create_table(
         "web_sessions",
         sa.Column("id", uuid, primary_key=True, nullable=False),
-        sa.Column("repository_id", uuid, nullable=True),
-        sa.Column("token_hash", sa.String(length=255), nullable=False),
+        sa.Column("user_id", uuid, nullable=False),
+        sa.Column("token_hash", sa.String(length=64), nullable=False),
+        sa.Column("csrf_token_hash", sa.String(length=64), nullable=False),
         sa.Column("expires_at", timestamp, nullable=False),
         sa.Column(
             "created_at", timestamp, nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")
         ),
-        sa.ForeignKeyConstraint(
-            ["repository_id"], ["repository_connections.id"], ondelete="SET NULL"
-        ),
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
         sa.UniqueConstraint("token_hash"),
     )
 
@@ -195,4 +249,9 @@ def downgrade() -> None:
     op.drop_table("releases")
     op.drop_table("release_policies")
     op.drop_table("repository_connections")
+    op.drop_table("oauth_states")
+    op.drop_table("user_installation_access")
+    op.drop_table("github_installations")
+    op.drop_table("encrypted_user_credentials")
+    op.drop_table("users")
     op.execute("DROP FUNCTION prevent_immutable_analysis_update();")
