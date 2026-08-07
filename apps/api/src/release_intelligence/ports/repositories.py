@@ -27,6 +27,8 @@ class StoredAnalysisRun:
 
 
 class AnalysisRepositoryPort(Protocol):
+    async def close(self) -> None: ...
+
     async def create_run(
         self,
         *,
