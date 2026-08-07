@@ -69,11 +69,12 @@ class AuthStore(Protocol):
         self, state_hash: str, binding_hash: str, consumed_at: datetime
     ) -> bool: ...
 
-    async def upsert_user_with_credential(
-        self, user: CurrentUser, encrypted_credential: str
+    async def complete_oauth_login(
+        self,
+        user: CurrentUser,
+        encrypted_credential: str,
+        session: SessionRecord,
     ) -> None: ...
-
-    async def create_session(self, session: SessionRecord) -> None: ...
 
     async def get_session(
         self, token_hash: str, accessed_at: datetime

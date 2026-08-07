@@ -31,6 +31,7 @@ from release_intelligence.security.crypto import (
     digest_matches,
     token_digest,
 )
+from release_intelligence.security.logging import install_access_log_redaction
 
 UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 DEFAULT_SESSION_TTL_SECONDS = 8 * 60 * 60
@@ -87,6 +88,7 @@ def create_app(
         owned_client: ManagedGitHubHttpClient | None = None
         configuration = settings
         try:
+            install_access_log_redaction()
             if configure_auth and (
                 store is None or gateway is None or credential_cipher is None
             ):

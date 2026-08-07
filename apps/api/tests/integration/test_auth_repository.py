@@ -18,6 +18,7 @@ from release_intelligence.adapters.persistence.auth import AuthRepository
 from release_intelligence.api.dependencies import CurrentUser, SessionRecord
 from release_intelligence.config import AppSettings
 from release_intelligence.main import create_app
+from release_intelligence.ports.auth import AuthPersistenceError
 from release_intelligence.security.crypto import token_digest
 
 API_ROOT = Path(__file__).resolve().parents[2]
@@ -65,6 +66,9 @@ async def postgres() -> AsyncIterator[asyncpg.Connection]:
     await connection.execute("TRUNCATE TABLE users RESTART IDENTITY CASCADE")
     await connection.execute(
         "TRUNCATE TABLE repository_connections RESTART IDENTITY CASCADE"
+    )
+    await connection.execute(
+        "TRUNCATE TABLE github_installations RESTART IDENTITY CASCADE"
     )
     try:
         yield connection
@@ -176,11 +180,76 @@ async def test_deleting_installation_cascades_repository_connection(
         full_name="example/allowed",
     )
 
-    await postgres.execute(
-        "DELETE FROM github_installations WHERE external_installation_id = 123"
+    disconnected = await auth_repository.disconnect_installation(
+        user_id=user.id, installation_id=123
     )
 
+    assert disconnected is True
+    assert await postgres.fetchval("SELECT count(*) FROM github_installations") == 0
     assert await postgres.fetchval("SELECT count(*) FROM repository_connections") == 0
+    assert (
+        await postgres.fetchval(
+            "SELECT count(*) FROM repository_connections WHERE installation_id IS NULL"
+        )
+        == 0
+    )
+
+
+async def test_oauth_completion_rolls_back_user_credential_and_session_atomically(
+    auth_repository: AuthRepository,
+    postgres: asyncpg.Connection,
+) -> None:
+    now = datetime(2026, 8, 7, 16, 0, tzinfo=UTC)
+    existing_user = CurrentUser(id="github:7", login="octocat")
+    await auth_repository.upsert_user_with_credential(
+        existing_user, "existing-ciphertext"
+    )
+    await postgres.execute(
+        """
+        CREATE FUNCTION reject_test_web_session_insert() RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'test session insert failure';
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER reject_test_web_session_insert
+        BEFORE INSERT ON web_sessions
+        FOR EACH ROW EXECUTE FUNCTION reject_test_web_session_insert();
+        """
+    )
+    try:
+        with pytest.raises(AuthPersistenceError):
+            await auth_repository.complete_oauth_login(
+                existing_user,
+                "replacement-ciphertext",
+                SessionRecord(
+                    user_id=existing_user.id,
+                    token_hash="existing-user-session",
+                    csrf_token_hash="csrf-hash",
+                    expires_at=now + timedelta(hours=1),
+                ),
+            )
+        with pytest.raises(AuthPersistenceError):
+            await auth_repository.complete_oauth_login(
+                CurrentUser(id="github:99", login="new-user"),
+                "new-user-ciphertext",
+                SessionRecord(
+                    user_id="github:99",
+                    token_hash="new-user-session",
+                    csrf_token_hash="csrf-hash",
+                    expires_at=now + timedelta(hours=1),
+                ),
+            )
+    finally:
+        await postgres.execute(
+            "DROP TRIGGER IF EXISTS reject_test_web_session_insert ON web_sessions;"
+            "DROP FUNCTION IF EXISTS reject_test_web_session_insert();"
+        )
+
+    assert await postgres.fetchval("SELECT count(*) FROM users") == 1
+    assert await postgres.fetchval(
+        "SELECT encrypted_token FROM encrypted_user_credentials"
+    ) == "existing-ciphertext"
+    assert await postgres.fetchval("SELECT count(*) FROM web_sessions") == 0
 
 
 async def test_production_lifespan_wires_real_postgresql_auth_repository(

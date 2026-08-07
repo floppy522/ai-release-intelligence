@@ -84,17 +84,18 @@ class FakeAuthStore:
         self.oauth_states.pop(state_hash)
         return True
 
-    async def upsert_user_with_credential(
-        self, user: CurrentUser, encrypted_credential: str
+    async def complete_oauth_login(
+        self,
+        user: CurrentUser,
+        encrypted_credential: str,
+        session: SessionRecord,
     ) -> None:
-        self.users[user.id] = user
-        self.credentials[user.id] = encrypted_credential
-
-    async def create_session(self, session: SessionRecord) -> None:
         if self.fail_create_session:
             raise AuthPersistenceError() from RuntimeError(
                 "postgresql://user:secret-password@database"
             )
+        self.users[user.id] = user
+        self.credentials[user.id] = encrypted_credential
         self.sessions[session.token_hash] = session
 
     async def get_session(
@@ -387,6 +388,8 @@ async def test_auth_failures_are_typed_sanitized_and_never_echo_secrets(
     assert invalid.status_code == 400
     assert upstream.status_code == 502
     assert persistence.status_code == 503
+    assert store.credentials == {}
+    assert store.sessions == {}
     combined_bodies = malformed.text + invalid.text + upstream.text + persistence.text
     for secret in (
         malformed_secret,

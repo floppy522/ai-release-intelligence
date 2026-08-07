@@ -156,14 +156,15 @@ async def github_callback(
     session_token = generate_opaque_token()
     csrf_token = generate_opaque_token()
     try:
-        await store.upsert_user_with_credential(user, cipher.encrypt(user_token))
-        await store.create_session(
+        await store.complete_oauth_login(
+            user,
+            cipher.encrypt(user_token),
             SessionRecord(
                 user_id=user.id,
                 token_hash=token_digest(session_token),
                 csrf_token_hash=token_digest(csrf_token),
                 expires_at=now + timedelta(seconds=lifetimes.session_seconds),
-            )
+            ),
         )
     except AuthPersistenceError:
         return _callback_error(
