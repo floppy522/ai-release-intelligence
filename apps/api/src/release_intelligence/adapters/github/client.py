@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Hashable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Self, TypeVar
 from urllib.parse import (
+    SplitResult,
     parse_qsl,
     quote,
+    unquote,
     urlencode,
     urljoin,
-    urlparse,
     urlsplit,
     urlunsplit,
 )
@@ -48,6 +49,10 @@ QueryValue = str | int | float | bool | None
 MAX_PAGES = 20
 API_VERSION = "2022-11-28"
 API_BASE_URL = "https://api.github.com"
+SECONDARY_RATE_LIMIT_PHRASES = (
+    "secondary rate limit",
+    "abuse detection mechanism",
+)
 
 
 class GitHubRestClient:
@@ -70,7 +75,10 @@ class GitHubRestClient:
             base_url=API_BASE_URL,
             timeout=httpx.Timeout(10.0, connect=10.0, read=10.0),
         )
-        self._api_origin = self._origin(str(self._client.base_url))
+        try:
+            self._api_origin = self._origin(str(self._client.base_url))
+        except GitHubPayloadError:
+            raise GitHubPartialData() from None
         self.rate_limit = GitHubRateLimit()
 
     async def __aenter__(self) -> Self:
@@ -149,7 +157,10 @@ class GitHubRestClient:
         next_params: dict[str, QueryValue] | None = {"per_page": 100}
         for page in range(1, MAX_PAGES + 1):
             response, payload = await self._request(next_url, params=next_params)
-            page_url = self._canonical_url(str(response.request.url))
+            try:
+                page_url = self._canonical_url(str(response.request.url))
+            except GitHubPayloadError:
+                raise GitHubPartialData() from None
             if page_url in seen_page_urls:
                 raise GitHubPartialData()
             seen_page_urls.add(page_url)
@@ -171,8 +182,11 @@ class GitHubRestClient:
                 if comparison.total_commits != len(seen_commit_shas):
                     raise GitHubPartialData()
                 return replace(comparison, commits=tuple(commits))
-            if self._canonical_url(next_url) in seen_page_urls:
-                raise GitHubPartialData()
+            try:
+                if self._canonical_url(next_url) in seen_page_urls:
+                    raise GitHubPartialData()
+            except GitHubPayloadError:
+                raise GitHubPartialData() from None
             if page == MAX_PAGES:
                 raise GitHubPartialData()
             next_params = None
@@ -292,7 +306,7 @@ class GitHubRestClient:
             raise transport_failure
         assert response is not None
         self._capture_rate_limit(response.headers)
-        self._raise_for_status(response.status_code, response.headers)
+        self._raise_for_status(response)
         payload: object | None = None
         parse_failure: GitHubPartialData | None = None
         try:
@@ -303,13 +317,14 @@ class GitHubRestClient:
             raise parse_failure
         return response, payload
 
-    def _raise_for_status(self, status_code: int, headers: httpx.Headers) -> None:
+    def _raise_for_status(self, response: httpx.Response) -> None:
+        status_code = response.status_code
         if status_code == 429:
             raise GitHubRateLimited()
         if status_code == 403:
             if self.rate_limit.remaining == 0 or self._valid_retry_after(
-                headers.get("Retry-After")
-            ):
+                response.headers.get("Retry-After")
+            ) or self._has_secondary_rate_limit_message(response):
                 raise GitHubRateLimited()
             raise GitHubUnauthorized()
         if status_code == 401:
@@ -355,29 +370,47 @@ class GitHubRestClient:
             return False
         return parsed.tzinfo is not None
 
+    @staticmethod
+    def _has_secondary_rate_limit_message(response: httpx.Response) -> bool:
+        payload: object | None = None
+        try:
+            payload = response.json()
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(payload, Mapping):
+            return False
+        message = payload.get("message")
+        if not isinstance(message, str):
+            return False
+        normalized = " ".join(message.casefold().split())
+        return any(phrase in normalized for phrase in SECONDARY_RATE_LIMIT_PHRASES)
+
     def _next_link(self, response: httpx.Response) -> str | None:
         try:
             target = response.links.get("next", {}).get("url")
-        except (KeyError, TypeError, ValueError):
+            if target is None:
+                return None
+            if not isinstance(target, str):
+                raise GitHubPayloadError("invalid GitHub pagination")
+            absolute = urljoin(str(response.request.url), target)
+            if self._origin(absolute) != self._api_origin:
+                raise GitHubPayloadError("invalid GitHub pagination")
+            return absolute
+        except (GitHubPayloadError, KeyError, TypeError, UnicodeError, ValueError):
             raise GitHubPayloadError("invalid GitHub pagination") from None
-        if target is None:
-            return None
-        if not isinstance(target, str):
-            raise GitHubPayloadError("invalid GitHub pagination")
-        absolute = urljoin(str(response.request.url), target)
-        if self._origin(absolute) != self._api_origin:
-            raise GitHubPayloadError("invalid GitHub pagination")
-        return absolute
 
-    @staticmethod
-    def _origin(url: str) -> tuple[str, str, int | None]:
-        parsed = urlparse(url)
-        return parsed.scheme, parsed.hostname or "", parsed.port
+    @classmethod
+    def _origin(cls, url: str) -> tuple[str, str, int | None]:
+        parsed = cls._validated_url(url)
+        port = parsed.port
+        if (parsed.scheme.lower(), port) in (("http", 80), ("https", 443)):
+            port = None
+        return parsed.scheme.lower(), parsed.hostname or "", port
 
-    @staticmethod
-    def _canonical_url(url: str) -> str:
-        parsed = urlsplit(url)
-        hostname = (parsed.hostname or "").lower()
+    @classmethod
+    def _canonical_url(cls, url: str) -> str:
+        parsed = cls._validated_url(url)
+        hostname = parsed.hostname or ""
         default_port = (parsed.scheme.lower(), parsed.port) in (
             ("http", 80),
             ("https", 443),
@@ -388,6 +421,62 @@ class GitHubRestClient:
         return urlunsplit(
             (parsed.scheme.lower(), netloc, parsed.path or "/", query, "")
         )
+
+    @staticmethod
+    def _validated_url(url: str) -> SplitResult:
+        try:
+            if not url or GitHubRestClient._invalid_percent_encoding(url):
+                raise GitHubPayloadError("invalid GitHub URL")
+            if any(character.isspace() for character in url):
+                raise GitHubPayloadError("invalid GitHub URL")
+            decoded = unquote(url)
+            if any(ord(character) < 32 for character in decoded):
+                raise GitHubPayloadError("invalid GitHub URL")
+            if any(ord(character) == 127 for character in decoded):
+                raise GitHubPayloadError("invalid GitHub URL")
+            parsed = urlsplit(url)
+            scheme = parsed.scheme.lower()
+            hostname = parsed.hostname
+            port = parsed.port
+            if (
+                scheme not in ("http", "https")
+                or hostname is None
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.fragment
+            ):
+                raise GitHubPayloadError("invalid GitHub URL")
+            if port is not None and not 1 <= port <= 65535:
+                raise GitHubPayloadError("invalid GitHub URL")
+            labels = hostname.split(".")
+            if any(
+                not label
+                or len(label) > 63
+                or label.startswith("-")
+                or label.endswith("-")
+                or not label.isascii()
+                or not all(
+                    character.isalnum() or character == "-" for character in label
+                )
+                for label in labels
+            ):
+                raise GitHubPayloadError("invalid GitHub URL")
+            parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+            return parsed
+        except (GitHubPayloadError, TypeError, UnicodeError, ValueError):
+            raise GitHubPayloadError("invalid GitHub URL") from None
+
+    @staticmethod
+    def _invalid_percent_encoding(url: str) -> bool:
+        hexadecimal = frozenset("0123456789abcdefABCDEF")
+        for index, character in enumerate(url):
+            if character == "%" and (
+                index + 2 >= len(url)
+                or url[index + 1] not in hexadecimal
+                or url[index + 2] not in hexadecimal
+            ):
+                return True
+        return False
 
     @staticmethod
     def _require_list(payload: object) -> list[object]:

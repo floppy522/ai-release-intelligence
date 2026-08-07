@@ -13,7 +13,7 @@
   {
     "id": 9100142,
     "number": 142,
-    "html_url": "https://github.com/octo-fixtures/release-demo/issues/142",
+    "html_url": "https://github.com/octo-fixtures/release-demo/pull/142",
     "state": "closed",
     "labels": [{"name": "code-change"}],
     "assignees": [{"login": "lee-api"}],

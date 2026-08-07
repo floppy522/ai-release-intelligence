@@ -91,6 +91,7 @@ async def test_client_follows_rfc_link_and_preserves_latest_rate_limit() -> None
         (141, "ISSUE"),
         (142, "PULL_REQUEST"),
     ]
+    assert items[1].url == "https://github.com/octo-fixtures/release-demo/pull/142"
     assert client.rate_limit.remaining == 4997
     assert client.rate_limit.reset_at == datetime.fromtimestamp(1786125600, UTC)
     assert len(requests) == 2
@@ -404,6 +405,26 @@ async def test_compare_rejects_canonical_pagination_cycle_immediately() -> None:
     assert len(requests) == 2
 
 
+async def test_compare_rejects_link_with_invalid_port_as_partial_data() -> None:
+    payload = _fixture("compare_commits.json")
+
+    client, http = _client(
+        lambda request: _response(
+            request,
+            200,
+            payload,
+            headers={
+                "Link": '<https://api.github.com:bad/compare?page=2>; rel="next"'
+            },
+        )
+    )
+    try:
+        with pytest.raises(GitHubPartialData, match="incomplete"):
+            await client.compare_commits(REPO, "main", "release/2026-08-10")
+    finally:
+        await http.aclose()
+
+
 async def test_paths_encode_repository_segments_and_refs() -> None:
     requests: list[httpx.Request] = []
 
@@ -499,6 +520,41 @@ async def test_cross_origin_pagination_link_is_rejected_before_request() -> None
     assert len(requests) == 1
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://api.github.com:bad/items?page=2",
+        "https://user@api.github.com/items?page=2",
+        "file://api.github.com/items?page=2",
+        "https://api..github.com/items?page=2",
+        "https://api.github.com/items%ZZ?page=2",
+        "https://api.github.com/items%0Ahidden?page=2",
+    ],
+)
+async def test_malformed_pagination_link_fails_closed(target: str) -> None:
+    source = _fixture("milestone_items.json")
+    assert isinstance(source, list)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _response(
+            request,
+            200,
+            [source[0]],
+            headers={"Link": f'<{target}>; rel="next"'},
+        )
+
+    client, http = _client(handler)
+    try:
+        with pytest.raises(GitHubPartialData, match="incomplete"):
+            await client.list_milestone_items(REPO, 7)
+    finally:
+        await http.aclose()
+
+    assert len(requests) == 1
+
+
 @pytest.mark.parametrize("status", [403, 429])
 async def test_rate_limit_takes_precedence_and_stops_immediately(status: int) -> None:
     requests: list[httpx.Request] = []
@@ -552,6 +608,47 @@ async def test_403_with_valid_retry_after_is_rate_limited() -> None:
     )
     try:
         with pytest.raises(GitHubRateLimited, match="rate limited"):
+            await client.get_milestone(REPO, 7)
+    finally:
+        await http.aclose()
+
+
+async def test_secondary_rate_limit_message_without_headers_is_rate_limited() -> None:
+    client, http = _client(
+        lambda request: _response(
+            request,
+            403,
+            {
+                "message": (
+                    "You have exceeded a secondary rate limit. "
+                    "Please wait a few minutes before you try again."
+                )
+            },
+        )
+    )
+    try:
+        with pytest.raises(GitHubRateLimited, match="rate limited") as raised:
+            await client.get_milestone(REPO, 7)
+    finally:
+        await http.aclose()
+
+    assert TOKEN.get_secret_value() not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"message": 403},
+        ["secondary rate limit"],
+        {"message": "Resource not accessible by integration"},
+    ],
+)
+async def test_403_without_safe_rate_signal_is_unauthorized(payload: object) -> None:
+    client, http = _client(
+        lambda request: _response(request, 403, payload)
+    )
+    try:
+        with pytest.raises(GitHubUnauthorized, match="unauthorized"):
             await client.get_milestone(REPO, 7)
     finally:
         await http.aclose()
