@@ -136,6 +136,45 @@ async def test_issue_timeline_maps_only_pull_request_cross_references() -> None:
     assert events[0].source_id == "9200001"
     assert events[0].pull_request_number == 142
     assert events[0].pull_request_url.endswith("/pull/142")
+    assert events[0].source_repository == REPO
+
+
+async def test_issue_timeline_excludes_same_number_from_an_external_repo() -> None:
+    payload = _fixture("issue_timeline.json")
+    assert isinstance(payload, list)
+    external = json.loads(json.dumps(payload[0]))
+    external["id"] = 9200002
+    external["source"]["issue"]["html_url"] = (
+        "https://github.com/external-org/external-repo/pull/142"
+    )
+    client, http = _client(
+        lambda request: _response(request, 200, [external, payload[0]])
+    )
+    try:
+        events = await client.list_issue_timeline(REPO, 141)
+    finally:
+        await http.aclose()
+
+    assert len(events) == 1
+    assert events[0].source_repository == REPO
+    assert events[0].pull_request_url == (
+        "https://github.com/octo-fixtures/release-demo/pull/142"
+    )
+
+
+async def test_ambiguous_pull_request_timeline_url_fails_closed() -> None:
+    payload = _fixture("issue_timeline.json")
+    assert isinstance(payload, list)
+    ambiguous = json.loads(json.dumps(payload[0]))
+    ambiguous["source"]["issue"]["html_url"] = (
+        "https://github.com/octo-fixtures/release-demo/issues/142"
+    )
+    client, http = _client(lambda request: _response(request, 200, [ambiguous]))
+    try:
+        with pytest.raises(GitHubPartialData, match="incomplete"):
+            await client.list_issue_timeline(REPO, 141)
+    finally:
+        await http.aclose()
 
 
 async def test_pull_request_fixture_maps_refs_shas_and_timestamps() -> None:
@@ -147,6 +186,7 @@ async def test_pull_request_fixture_maps_refs_shas_and_timestamps() -> None:
         await http.aclose()
 
     assert pull.number == 142
+    assert pull.url == "https://github.com/octo-fixtures/release-demo/pull/142"
     assert pull.labels == ("code-change",)
     assert pull.assignees == ("lee-api",)
     assert pull.milestone_number == 7
@@ -172,6 +212,86 @@ async def test_check_fixture_maps_runs_without_logs() -> None:
     assert checks[0].head_sha == "4" * 40
     assert not hasattr(checks[0], "output")
     assert not hasattr(checks[0], "logs")
+
+
+async def test_checks_reject_missing_page_when_total_count_is_larger() -> None:
+    payload = _fixture("check_runs.json")
+    assert isinstance(payload, dict)
+    incomplete = {**payload, "total_count": 3}
+    client, http = _client(lambda request: _response(request, 200, incomplete))
+    try:
+        with pytest.raises(GitHubPartialData, match="incomplete"):
+            await client.list_checks_for_ref(REPO, "release/2026-08-10")
+    finally:
+        await http.aclose()
+
+
+async def test_checks_reject_inconsistent_total_count_between_pages() -> None:
+    payload = _fixture("check_runs.json")
+    assert isinstance(payload, dict)
+    runs = payload["check_runs"]
+    assert isinstance(runs, list)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("page") == "2":
+            return _response(
+                request, 200, {"total_count": 3, "check_runs": [runs[1]]}
+            )
+        return _response(
+            request,
+            200,
+            {"total_count": 2, "check_runs": [runs[0]]},
+            headers={"Link": '</checks?per_page=100&page=2>; rel="next"'},
+        )
+
+    client, http = _client(handler)
+    try:
+        with pytest.raises(GitHubPartialData, match="incomplete"):
+            await client.list_checks_for_ref(REPO, "release/2026-08-10")
+    finally:
+        await http.aclose()
+
+
+async def test_checks_reject_duplicate_run_id_across_pages() -> None:
+    payload = _fixture("check_runs.json")
+    assert isinstance(payload, dict)
+    runs = payload["check_runs"]
+    assert isinstance(runs, list)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        headers = (
+            {}
+            if request.url.params.get("page") == "2"
+            else {"Link": '</checks?per_page=100&page=2>; rel="next"'}
+        )
+        return _response(
+            request,
+            200,
+            {"total_count": 2, "check_runs": [runs[0]]},
+            headers=headers,
+        )
+
+    client, http = _client(handler)
+    try:
+        with pytest.raises(GitHubPartialData, match="incomplete"):
+            await client.list_checks_for_ref(REPO, "release/2026-08-10")
+    finally:
+        await http.aclose()
+
+
+@pytest.mark.parametrize("total_count", [None, "2", -1, True])
+async def test_checks_reject_invalid_total_count_on_any_page(
+    total_count: object,
+) -> None:
+    payload = _fixture("check_runs.json")
+    assert isinstance(payload, dict)
+    invalid = {**payload, "total_count": total_count}
+    client, http = _client(lambda request: _response(request, 200, invalid))
+    try:
+        with pytest.raises(GitHubPartialData, match="incomplete"):
+            await client.list_checks_for_ref(REPO, "release/2026-08-10")
+    finally:
+        await http.aclose()
 
 
 async def test_compare_fixture_maps_commit_evidence() -> None:
@@ -224,6 +344,64 @@ async def test_compare_follows_pagination_and_returns_complete_commit_set() -> N
 
     assert len(requests) == 2
     assert [commit.sha for commit in comparison.commits] == ["3" * 40, "4" * 40]
+
+
+async def test_compare_rejects_duplicate_commit_sha_across_pages() -> None:
+    payload = _fixture("compare_commits.json")
+    assert isinstance(payload, dict)
+    commits = payload["commits"]
+    assert isinstance(commits, list)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page_payload = {**payload, "commits": [commits[0]]}
+        headers = (
+            {}
+            if request.url.params.get("page") == "2"
+            else {"Link": '</compare/result?per_page=100&page=2>; rel="next"'}
+        )
+        return _response(request, 200, page_payload, headers=headers)
+
+    client, http = _client(handler)
+    try:
+        with pytest.raises(GitHubPartialData, match="incomplete"):
+            await client.compare_commits(REPO, "main", "release/2026-08-10")
+    finally:
+        await http.aclose()
+
+
+async def test_compare_rejects_canonical_pagination_cycle_immediately() -> None:
+    payload = _fixture("compare_commits.json")
+    assert isinstance(payload, dict)
+    commits = payload["commits"]
+    assert isinstance(commits, list)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.params.get("page") == "2":
+            return _response(
+                request,
+                200,
+                {**payload, "commits": [commits[1]]},
+                headers={
+                    "Link": '</compare/result?page=2&per_page=100>; rel="next"'
+                },
+            )
+        return _response(
+            request,
+            200,
+            {**payload, "commits": [commits[0]]},
+            headers={"Link": '</compare/result?per_page=100&page=2>; rel="next"'},
+        )
+
+    client, http = _client(handler)
+    try:
+        with pytest.raises(GitHubPartialData, match="incomplete"):
+            await client.compare_commits(REPO, "main", "release/2026-08-10")
+    finally:
+        await http.aclose()
+
+    assert len(requests) == 2
 
 
 async def test_paths_encode_repository_segments_and_refs() -> None:
@@ -295,6 +473,32 @@ async def test_pagination_stops_at_twenty_pages() -> None:
     assert len(requests) == 20
 
 
+async def test_cross_origin_pagination_link_is_rejected_before_request() -> None:
+    source = _fixture("milestone_items.json")
+    assert isinstance(source, list)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _response(
+            request,
+            200,
+            [source[0]],
+            headers={
+                "Link": '<https://attacker.invalid/items?page=2>; rel="next"'
+            },
+        )
+
+    client, http = _client(handler)
+    try:
+        with pytest.raises(GitHubPartialData, match="incomplete"):
+            await client.list_milestone_items(REPO, 7)
+    finally:
+        await http.aclose()
+
+    assert len(requests) == 1
+
+
 @pytest.mark.parametrize("status", [403, 429])
 async def test_rate_limit_takes_precedence_and_stops_immediately(status: int) -> None:
     requests: list[httpx.Request] = []
@@ -324,6 +528,49 @@ async def test_rate_limit_takes_precedence_and_stops_immediately(status: int) ->
     assert TOKEN.get_secret_value() not in str(raised.value)
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
+
+
+async def test_429_is_rate_limited_without_rate_limit_headers() -> None:
+    client, http = _client(
+        lambda request: _response(request, 429, {"message": "too many requests"})
+    )
+    try:
+        with pytest.raises(GitHubRateLimited, match="rate limited"):
+            await client.get_milestone(REPO, 7)
+    finally:
+        await http.aclose()
+
+
+async def test_403_with_valid_retry_after_is_rate_limited() -> None:
+    client, http = _client(
+        lambda request: _response(
+            request,
+            403,
+            {"message": "secondary rate limit"},
+            headers={"Retry-After": "60"},
+        )
+    )
+    try:
+        with pytest.raises(GitHubRateLimited, match="rate limited"):
+            await client.get_milestone(REPO, 7)
+    finally:
+        await http.aclose()
+
+
+async def test_ordinary_permission_403_is_unauthorized() -> None:
+    client, http = _client(
+        lambda request: _response(
+            request,
+            403,
+            {"message": "Resource not accessible by integration"},
+            headers={"X-RateLimit-Remaining": "41"},
+        )
+    )
+    try:
+        with pytest.raises(GitHubUnauthorized, match="unauthorized"):
+            await client.get_milestone(REPO, 7)
+    finally:
+        await http.aclose()
 
 
 @pytest.mark.parametrize(
@@ -414,6 +661,58 @@ async def test_transport_failure_is_sanitized_partial_data() -> None:
     assert TOKEN.get_secret_value() not in str(raised.value)
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
+
+
+async def test_invalid_json_is_partial_data() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b'{"truncated":',
+            headers={"Content-Type": "application/json"},
+            request=request,
+        )
+
+    client, http = _client(handler)
+    try:
+        with pytest.raises(GitHubPartialData, match="incomplete"):
+            await client.get_milestone(REPO, 7)
+    finally:
+        await http.aclose()
+
+
+async def test_owned_client_is_closed_by_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "ALL_PROXY",
+        "FTP_PROXY",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ftp_proxy",
+        "http_proxy",
+        "https_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    client = GitHubRestClient(token=TOKEN)
+
+    await client.aclose()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await client.get_milestone(REPO, 7)
+
+
+async def test_injected_client_remains_open_after_adapter_close() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _response(request, 200, {"alive": True})
+
+    client, http = _client(handler)
+
+    await client.aclose()
+    response = await http.get("/still-open")
+    await http.aclose()
+
+    assert response.json() == {"alive": True}
 
 
 def test_contract_fixtures_contain_only_allowlisted_evidence_fields() -> None:

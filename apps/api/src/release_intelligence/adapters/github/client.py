@@ -1,10 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from dataclasses import replace
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Self, TypeVar
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import (
+    parse_qsl,
+    quote,
+    urlencode,
+    urljoin,
+    urlparse,
+    urlsplit,
+    urlunsplit,
+)
 
 import httpx
 from pydantic import SecretStr
@@ -99,7 +108,12 @@ class GitHubRestClient:
             params={"per_page": 100},
             mapper=map_timeline_event,
         )
-        return tuple(event for event in events if event is not None)
+        return tuple(
+            event
+            for event in events
+            if event is not None
+            and self._same_repository(event.source_repository, repo)
+        )
 
     async def get_pull_request(
         self, repo: RepoRef, pull_number: int
@@ -117,6 +131,7 @@ class GitHubRestClient:
             key="check_runs",
             params={"per_page": 100},
             mapper=map_check,
+            identity=lambda check: check.run_id,
         )
 
     async def compare_commits(
@@ -128,24 +143,36 @@ class GitHubRestClient:
         )
         comparison: CommitComparison | None = None
         commits: list[GitHubCommit] = []
+        seen_commit_shas: set[str] = set()
+        seen_page_urls: set[str] = set()
         next_url: str | None = path
         next_params: dict[str, QueryValue] | None = {"per_page": 100}
         for page in range(1, MAX_PAGES + 1):
             response, payload = await self._request(next_url, params=next_params)
+            page_url = self._canonical_url(str(response.request.url))
+            if page_url in seen_page_urls:
+                raise GitHubPartialData()
+            seen_page_urls.add(page_url)
             current = self._map_one(payload, map_comparison)
             if comparison is None:
                 comparison = current
             elif replace(current, commits=()) != replace(comparison, commits=()):
                 raise GitHubPartialData()
-            commits.extend(current.commits)
+            for commit in current.commits:
+                if commit.sha in seen_commit_shas:
+                    raise GitHubPartialData()
+                seen_commit_shas.add(commit.sha)
+                commits.append(commit)
             try:
                 next_url = self._next_link(response)
             except GitHubPayloadError:
                 raise GitHubPartialData() from None
             if next_url is None:
-                if comparison.total_commits != len(commits):
+                if comparison.total_commits != len(seen_commit_shas):
                     raise GitHubPartialData()
                 return replace(comparison, commits=tuple(commits))
+            if self._canonical_url(next_url) in seen_page_urls:
+                raise GitHubPartialData()
             if page == MAX_PAGES:
                 raise GitHubPartialData()
             next_params = None
@@ -175,13 +202,43 @@ class GitHubRestClient:
         key: str,
         params: dict[str, QueryValue],
         mapper: Callable[[object], T],
+        identity: Callable[[T], Hashable],
     ) -> tuple[T, ...]:
-        def select(payload: object) -> list[object]:
-            if not isinstance(payload, dict):
-                raise GitHubPayloadError("invalid GitHub payload")
-            return self._require_list(payload.get(key))
-
-        return await self._paginate(path, params=params, items=select, mapper=mapper)
+        result: list[T] = []
+        seen: set[Hashable] = set()
+        expected_total: int | None = None
+        next_url: str | None = path
+        next_params: dict[str, QueryValue] | None = params
+        for page in range(1, MAX_PAGES + 1):
+            response, payload = await self._request(next_url, params=next_params)
+            try:
+                if not isinstance(payload, dict):
+                    raise GitHubPayloadError("invalid GitHub payload")
+                page_total = self._require_count(payload.get("total_count"))
+                if expected_total is None:
+                    expected_total = page_total
+                elif page_total != expected_total:
+                    raise GitHubPayloadError("inconsistent GitHub total")
+                for raw_item in self._require_list(payload.get(key)):
+                    mapped = mapper(raw_item)
+                    item_identity = identity(mapped)
+                    if item_identity in seen:
+                        raise GitHubPayloadError("duplicate GitHub item")
+                    seen.add(item_identity)
+                    result.append(mapped)
+                if len(seen) > expected_total:
+                    raise GitHubPayloadError("invalid GitHub total")
+                next_url = self._next_link(response)
+            except (GitHubPayloadError, TypeError, ValueError, AttributeError):
+                raise GitHubPartialData() from None
+            if next_url is None:
+                if len(seen) != expected_total:
+                    raise GitHubPartialData()
+                return tuple(result)
+            if page == MAX_PAGES:
+                raise GitHubPartialData()
+            next_params = None
+        raise GitHubPartialData()
 
     async def _paginate(
         self,
@@ -235,7 +292,7 @@ class GitHubRestClient:
             raise transport_failure
         assert response is not None
         self._capture_rate_limit(response.headers)
-        self._raise_for_status(response.status_code)
+        self._raise_for_status(response.status_code, response.headers)
         payload: object | None = None
         parse_failure: GitHubPartialData | None = None
         try:
@@ -246,9 +303,15 @@ class GitHubRestClient:
             raise parse_failure
         return response, payload
 
-    def _raise_for_status(self, status_code: int) -> None:
-        if status_code in (403, 429):
+    def _raise_for_status(self, status_code: int, headers: httpx.Headers) -> None:
+        if status_code == 429:
             raise GitHubRateLimited()
+        if status_code == 403:
+            if self.rate_limit.remaining == 0 or self._valid_retry_after(
+                headers.get("Retry-After")
+            ):
+                raise GitHubRateLimited()
+            raise GitHubUnauthorized()
         if status_code == 401:
             raise GitHubUnauthorized()
         if status_code == 404:
@@ -280,6 +343,18 @@ class GitHubRestClient:
         except (OverflowError, OSError, ValueError):
             return None
 
+    @staticmethod
+    def _valid_retry_after(value: str | None) -> bool:
+        if value is None:
+            return False
+        if value.isascii() and value.isdigit():
+            return True
+        try:
+            parsed = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return parsed.tzinfo is not None
+
     def _next_link(self, response: httpx.Response) -> str | None:
         try:
             target = response.links.get("next", {}).get("url")
@@ -300,10 +375,38 @@ class GitHubRestClient:
         return parsed.scheme, parsed.hostname or "", parsed.port
 
     @staticmethod
+    def _canonical_url(url: str) -> str:
+        parsed = urlsplit(url)
+        hostname = (parsed.hostname or "").lower()
+        default_port = (parsed.scheme.lower(), parsed.port) in (
+            ("http", 80),
+            ("https", 443),
+        )
+        port = "" if parsed.port is None or default_port else f":{parsed.port}"
+        netloc = f"{hostname}{port}"
+        query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)))
+        return urlunsplit(
+            (parsed.scheme.lower(), netloc, parsed.path or "/", query, "")
+        )
+
+    @staticmethod
     def _require_list(payload: object) -> list[object]:
         if not isinstance(payload, list):
             raise GitHubPayloadError("invalid GitHub payload")
         return payload
+
+    @staticmethod
+    def _require_count(value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise GitHubPayloadError("invalid GitHub total")
+        return value
+
+    @staticmethod
+    def _same_repository(left: RepoRef, right: RepoRef) -> bool:
+        return (left.owner.casefold(), left.name.casefold()) == (
+            right.owner.casefold(),
+            right.name.casefold(),
+        )
 
     @staticmethod
     def _map_one(payload: object, mapper: Callable[[object], T]) -> T:

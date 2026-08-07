@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Never
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from release_intelligence.ports.github import (
     CommitComparison,
@@ -14,6 +14,7 @@ from release_intelligence.ports.github import (
     GitHubItemKind,
     GitHubMilestone,
     GitHubPullRequest,
+    RepoRef,
 )
 
 
@@ -141,12 +142,34 @@ def map_timeline_event(payload: object) -> GitHubIssueTimelineEvent | None:
     issue = _mapping(source.get("issue"))
     if not isinstance(issue.get("pull_request"), Mapping):
         return None
+    pull_request_number = _integer(issue.get("number"))
+    pull_request_url = _github_url(issue.get("html_url"))
     return GitHubIssueTimelineEvent(
         source_id=str(_integer(event.get("id"))),
-        pull_request_number=_integer(issue.get("number")),
-        pull_request_url=_github_url(issue.get("html_url")),
+        source_repository=_pull_request_repository(
+            pull_request_url, pull_request_number
+        ),
+        pull_request_number=pull_request_number,
+        pull_request_url=pull_request_url,
         created_at=_required_timestamp(event.get("created_at")),
     )
+
+
+def _pull_request_repository(url: str, pull_request_number: int) -> RepoRef:
+    parsed = urlparse(url)
+    segments = parsed.path.strip("/").split("/")
+    if parsed.query or parsed.fragment or len(segments) != 4 or segments[2] != "pull":
+        return _invalid()
+    owner, name = unquote(segments[0]), unquote(segments[1])
+    if not owner or not name or "/" in owner or "/" in name:
+        return _invalid()
+    try:
+        url_number = int(segments[3])
+    except ValueError:
+        return _invalid()
+    if url_number != pull_request_number:
+        return _invalid()
+    return RepoRef(owner=owner, name=name)
 
 
 def map_pull_request(payload: object) -> GitHubPullRequest:

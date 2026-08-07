@@ -94,6 +94,7 @@ class GitHubItem:
 @dataclass(frozen=True, slots=True)
 class GitHubIssueTimelineEvent:
     source_id: str
+    source_repository: RepoRef
     pull_request_number: int
     pull_request_url: str
     created_at: datetime
