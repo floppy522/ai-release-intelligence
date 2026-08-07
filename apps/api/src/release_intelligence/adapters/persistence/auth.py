@@ -78,53 +78,32 @@ class AuthRepository:
         if not encrypted_credential:
             raise ValueError("encrypted credential is required")
         async with self._session(transaction=True) as session:
-            await session.execute(
-                insert(UserRow)
-                .values(
-                    provider="github",
-                    external_user_id=user.id,
-                    login=user.login,
-                )
-                .on_conflict_do_update(
-                    constraint="uq_user_identity",
-                    set_={"login": user.login},
-                )
-            )
-            user_row = await session.scalar(
-                select(UserRow).where(
-                    UserRow.provider == "github",
-                    UserRow.external_user_id == user.id,
-                )
-            )
-            if user_row is None:
-                raise AuthPersistenceError() from None
-            await session.execute(
-                insert(EncryptedUserCredentialRow)
-                .values(
-                    user_id=user_row.id,
-                    encrypted_token=encrypted_credential,
-                )
-                .on_conflict_do_update(
-                    index_elements=[EncryptedUserCredentialRow.user_id],
-                    set_={
-                        "encrypted_token": encrypted_credential,
-                        "updated_at": datetime.now(UTC),
-                    },
-                )
+            await self._upsert_user_credential(
+                session, user, encrypted_credential
             )
 
     async def create_session(self, session_record: SessionRecord) -> None:
         self._require_aware(session_record.expires_at)
         async with self._session(transaction=True) as session:
-            user_row = await self._user_row(session, session_record.user_id)
-            session.add(
-                WebSessionRow(
-                    user_id=user_row.id,
-                    token_hash=session_record.token_hash,
-                    csrf_token_hash=session_record.csrf_token_hash,
-                    expires_at=session_record.expires_at,
-                )
+            await self._insert_session(session, session_record)
+
+    async def complete_oauth_login(
+        self,
+        user: CurrentUser,
+        encrypted_credential: str,
+        session_record: SessionRecord,
+    ) -> None:
+        """Commit identity, encrypted credential, and web session atomically."""
+        if not encrypted_credential:
+            raise ValueError("encrypted credential is required")
+        if session_record.user_id != user.id:
+            raise ValueError("session user must match authenticated user")
+        self._require_aware(session_record.expires_at)
+        async with self._session(transaction=True) as session:
+            await self._upsert_user_credential(
+                session, user, encrypted_credential
             )
+            await self._insert_session(session, session_record)
 
     async def get_session(
         self, token_hash: str, accessed_at: datetime
@@ -236,6 +215,86 @@ class AuthRepository:
             repository_id=repository.external_repository_id,
             full_name=repository.full_name,
             installation_id=installation.external_installation_id,
+        )
+
+    async def disconnect_installation(
+        self, *, user_id: str, installation_id: int
+    ) -> bool:
+        """Delete an authorized installation and cascade its repository connection."""
+        async with self._session(transaction=True) as session:
+            installation = await session.scalar(
+                select(GitHubInstallationRow)
+                .join(
+                    UserInstallationAccessRow,
+                    UserInstallationAccessRow.installation_id
+                    == GitHubInstallationRow.id,
+                )
+                .join(UserRow, UserRow.id == UserInstallationAccessRow.user_id)
+                .where(
+                    UserRow.provider == "github",
+                    UserRow.external_user_id == user_id,
+                    GitHubInstallationRow.external_installation_id
+                    == installation_id,
+                )
+            )
+            if installation is None:
+                return False
+            await session.delete(installation)
+        return True
+
+    @staticmethod
+    async def _upsert_user_credential(
+        session: AsyncSession,
+        user: CurrentUser,
+        encrypted_credential: str,
+    ) -> None:
+        await session.execute(
+            insert(UserRow)
+            .values(
+                provider="github",
+                external_user_id=user.id,
+                login=user.login,
+            )
+            .on_conflict_do_update(
+                constraint="uq_user_identity",
+                set_={"login": user.login},
+            )
+        )
+        user_row = await session.scalar(
+            select(UserRow).where(
+                UserRow.provider == "github",
+                UserRow.external_user_id == user.id,
+            )
+        )
+        if user_row is None:
+            raise AuthPersistenceError() from None
+        await session.execute(
+            insert(EncryptedUserCredentialRow)
+            .values(
+                user_id=user_row.id,
+                encrypted_token=encrypted_credential,
+            )
+            .on_conflict_do_update(
+                index_elements=[EncryptedUserCredentialRow.user_id],
+                set_={
+                    "encrypted_token": encrypted_credential,
+                    "updated_at": datetime.now(UTC),
+                },
+            )
+        )
+
+    @classmethod
+    async def _insert_session(
+        cls, session: AsyncSession, session_record: SessionRecord
+    ) -> None:
+        user_row = await cls._user_row(session, session_record.user_id)
+        session.add(
+            WebSessionRow(
+                user_id=user_row.id,
+                token_hash=session_record.token_hash,
+                csrf_token_hash=session_record.csrf_token_hash,
+                expires_at=session_record.expires_at,
+            )
         )
 
     @staticmethod
