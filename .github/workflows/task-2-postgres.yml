@@ -1,0 +1,41 @@
+name: Task 2 PostgreSQL persistence RED
+
+on:
+  push:
+    branches:
+      - feature/ai-release-intelligence
+
+permissions:
+  contents: read
+
+jobs:
+  task-2-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: release_intelligence_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d release_intelligence_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
+      - name: Synchronize API dependencies
+        working-directory: apps/api
+        run: uv sync
+      - name: Run PostgreSQL persistence contracts
+        working-directory: apps/api
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/release_intelligence_test
+        run: uv run pytest tests/integration/test_analysis_repository.py -v
