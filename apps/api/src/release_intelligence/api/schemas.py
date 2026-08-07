@@ -1,5 +1,7 @@
 from pydantic import BaseModel
 
+from release_intelligence.domain.models import ReleaseStatus
+
 
 class EvidenceResponse(BaseModel):
     evidence_id: str
@@ -18,5 +20,5 @@ class FindingResponse(BaseModel):
 
 
 class AssessmentResponse(BaseModel):
-    status: str
+    status: ReleaseStatus
     findings: tuple[FindingResponse, ...]
