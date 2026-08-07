@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,11 +19,11 @@ from uuid import UUID
 
 import asyncpg
 import pytest
+
 from release_intelligence.adapters.persistence.repositories import (
     AnalysisRepository,
     ImmutableSnapshotError,
 )
-
 from release_intelligence.domain.models import (
     EvidenceRef,
     ReadinessAssessment,
@@ -87,8 +88,13 @@ async def postgres(database_url: str) -> asyncpg.Connection:
 
 
 @pytest.fixture
-def repository(database_url: str) -> AnalysisRepository:
-    return AnalysisRepository(database_url)
+async def repository(database_url: str) -> AsyncIterator[AnalysisRepository]:
+    """Dispose each engine before pytest closes its function-scoped event loop."""
+    analysis_repository = AnalysisRepository(database_url)
+    try:
+        yield analysis_repository
+    finally:
+        await analysis_repository.close()
 
 
 @pytest.fixture
