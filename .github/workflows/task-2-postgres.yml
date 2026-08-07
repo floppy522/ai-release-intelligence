@@ -1,4 +1,4 @@
-name: Task 2 PostgreSQL persistence RED
+name: Task 2 PostgreSQL persistence
 
 on:
   push:
@@ -14,6 +14,8 @@ permissions:
 jobs:
   task-2-postgres:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/release_intelligence_test
     services:
       postgres:
         image: postgres:18
@@ -37,8 +39,24 @@ jobs:
       - name: Synchronize API dependencies
         working-directory: apps/api
         run: uv sync
-      - name: Run PostgreSQL persistence contracts
+      - name: Apply PostgreSQL migrations
         working-directory: apps/api
-        env:
-          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/release_intelligence_test
+        run: uv run alembic upgrade head
+      - name: Run focused PostgreSQL persistence contracts
+        working-directory: apps/api
         run: uv run pytest tests/integration/test_analysis_repository.py -v
+      - name: Run backend test suite
+        working-directory: apps/api
+        run: uv run pytest -v -W error
+      - name: Downgrade PostgreSQL migrations
+        working-directory: apps/api
+        run: uv run alembic downgrade base
+      - name: Reapply PostgreSQL migrations
+        working-directory: apps/api
+        run: uv run alembic upgrade head
+      - name: Lint backend
+        working-directory: apps/api
+        run: uv run ruff check src tests
+      - name: Type-check backend
+        working-directory: apps/api
+        run: uv run mypy
