@@ -42,6 +42,10 @@ class AnalysisRepository:
         self._engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
         self._sessions = async_sessionmaker(self._engine, expire_on_commit=False)
 
+    async def close(self) -> None:
+        """Release pooled asyncpg connections before the owning event loop closes."""
+        await self._engine.dispose()
+
     async def create_run(
         self,
         *,
