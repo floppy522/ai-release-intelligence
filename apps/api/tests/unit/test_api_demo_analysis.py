@@ -3,11 +3,13 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from release_intelligence.api.schemas import AssessmentResponse
-from release_intelligence.main import app
+from release_intelligence.main import create_app
+
+demo_app = create_app(configure_auth=False)
 
 
 def test_demo_analysis_returns_evidence_backed_status() -> None:
-    with TestClient(app) as client:
+    with TestClient(demo_app) as client:
         response = client.get("/api/demo/analysis")
 
     assert response.status_code == 200

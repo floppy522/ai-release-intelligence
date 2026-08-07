@@ -67,6 +67,7 @@ def upgrade() -> None:
         "oauth_states",
         sa.Column("id", uuid, primary_key=True, nullable=False),
         sa.Column("state_hash", sa.String(length=64), nullable=False),
+        sa.Column("binding_hash", sa.String(length=64), nullable=False),
         sa.Column("expires_at", timestamp, nullable=False),
         sa.Column(
             "created_at", timestamp, nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")

@@ -11,6 +11,7 @@ from pydantic import SecretStr
 from release_intelligence.adapters.github.auth import (
     GitHubOAuthIdentity,
 )
+from release_intelligence.ports.auth import AuthPersistenceError
 from release_intelligence.security.crypto import (
     CredentialCipher,
     digest_matches,
@@ -45,6 +46,12 @@ class AuthorizedRepository:
     installation_id: int
 
 
+@dataclass(frozen=True)
+class AuthLifetimes:
+    oauth_state_seconds: int
+    session_seconds: int
+
+
 class OAuthGateway(Protocol):
     def authorization_url(self, state: str) -> str: ...
 
@@ -54,10 +61,12 @@ class OAuthGateway(Protocol):
 
 
 class AuthStore(Protocol):
-    async def save_oauth_state(self, state_hash: str, expires_at: datetime) -> None: ...
+    async def save_oauth_state(
+        self, state_hash: str, binding_hash: str, expires_at: datetime
+    ) -> None: ...
 
     async def consume_oauth_state(
-        self, state_hash: str, consumed_at: datetime
+        self, state_hash: str, binding_hash: str, consumed_at: datetime
     ) -> bool: ...
 
     async def upsert_user_with_credential(
@@ -108,6 +117,13 @@ def get_clock(request: Request) -> Callable[[], datetime]:
     return cast(Callable[[], datetime], request.app.state.clock)
 
 
+def get_auth_lifetimes(request: Request) -> AuthLifetimes:
+    return AuthLifetimes(
+        oauth_state_seconds=cast(int, request.app.state.oauth_state_ttl_seconds),
+        session_seconds=cast(int, request.app.state.session_ttl_seconds),
+    )
+
+
 async def get_session_context(
     request: Request,
     store: Annotated[AuthStore, Depends(get_auth_store)],
@@ -119,7 +135,13 @@ async def get_session_context(
         return cached
     if not session_token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authentication required")
-    result = await store.get_session(token_digest(session_token), clock())
+    try:
+        result = await store.get_session(token_digest(session_token), clock())
+    except AuthPersistenceError:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Authentication temporarily unavailable",
+        ) from None
     if result is None:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, "Session is invalid or expired"
@@ -151,7 +173,13 @@ async def require_repository_access(
     repository_id: str,
     store: AuthStore,
 ) -> AuthorizedRepository:
-    repository = await store.find_repository_access(user_id, repository_id)
+    try:
+        repository = await store.find_repository_access(user_id, repository_id)
+    except AuthPersistenceError:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Authorization temporarily unavailable",
+        ) from None
     if repository is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Repository access denied")
     return repository

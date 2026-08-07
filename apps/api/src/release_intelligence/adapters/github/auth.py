@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from urllib.parse import urlencode
 
+import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from pydantic import SecretStr
@@ -23,6 +24,20 @@ class GitHubHttpClient(Protocol):
     async def post(self, path: str, **kwargs: object) -> GitHubResponse: ...
 
     async def get(self, path: str, **kwargs: object) -> GitHubResponse: ...
+
+
+class GitHubAuthorizationError(Exception):
+    """A caller-safe invalid OAuth authorization result."""
+
+    def __init__(self) -> None:
+        super().__init__("GitHub authorization was invalid")
+
+
+class GitHubUpstreamError(Exception):
+    """A caller-safe GitHub availability or response-contract failure."""
+
+    def __init__(self) -> None:
+        super().__init__("GitHub authentication unavailable")
 
 
 @dataclass(frozen=True)
@@ -80,18 +95,23 @@ class GitHubAppTokenProvider:
         return f"{segments[0]}.{segments[1]}.{_base64url(signature)}"
 
     async def installation_token(self, installation_id: int) -> SecretStr:
-        response = await self._client.post(
-            f"/app/installations/{installation_id}/access_tokens",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {self.create_app_jwt()}",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        response.raise_for_status()
-        token = response.json().get("token")
-        if not isinstance(token, str) or not token:
-            raise ValueError("GitHub response did not contain an installation token")
+        token: object | None = None
+        failed = False
+        try:
+            response = await self._client.post(
+                f"/app/installations/{installation_id}/access_tokens",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {self.create_app_jwt()}",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+            response.raise_for_status()
+            token = response.json().get("token")
+        except (httpx.HTTPError, TypeError, ValueError, AttributeError):
+            failed = True
+        if failed or not isinstance(token, str) or not token:
+            raise GitHubUpstreamError()
         return SecretStr(token)
 
 
@@ -116,34 +136,62 @@ class GitHubOAuthGateway:
         return f"https://github.com/login/oauth/authorize?{query}"
 
     async def exchange_code(self, code: str) -> SecretStr:
-        response = await self._client.post(
-            "https://github.com/login/oauth/access_token",
-            headers={"Accept": "application/json"},
-            json={
-                "client_id": self._client_id,
-                "client_secret": self._client_secret.get_secret_value(),
-                "code": code,
-            },
-        )
-        response.raise_for_status()
-        token = response.json().get("access_token")
+        token: object | None = None
+        failure: Exception | None = None
+        try:
+            response = await self._client.post(
+                "https://github.com/login/oauth/access_token",
+                headers={"Accept": "application/json"},
+                json={
+                    "client_id": self._client_id,
+                    "client_secret": self._client_secret.get_secret_value(),
+                    "code": code,
+                },
+            )
+            response.raise_for_status()
+            token = response.json().get("access_token")
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 429 or error.response.status_code >= 500:
+                failure = GitHubUpstreamError()
+            else:
+                failure = GitHubAuthorizationError()
+        except httpx.TransportError:
+            failure = GitHubUpstreamError()
+        except (TypeError, ValueError, AttributeError):
+            failure = GitHubAuthorizationError()
+        if failure is not None:
+            raise failure
         if not isinstance(token, str) or not token:
-            raise ValueError("GitHub response did not contain an OAuth token")
+            raise GitHubAuthorizationError()
         return SecretStr(token)
 
     async def current_user(self, token: SecretStr) -> GitHubOAuthIdentity:
-        response = await self._client.get(
-            "/user",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {token.get_secret_value()}",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
+        payload: Mapping[str, object] | None = None
+        failure: Exception | None = None
+        try:
+            response = await self._client.get(
+                "/user",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {token.get_secret_value()}",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in (401, 403):
+                failure = GitHubAuthorizationError()
+            else:
+                failure = GitHubUpstreamError()
+        except (httpx.TransportError, TypeError, ValueError, AttributeError):
+            failure = GitHubUpstreamError()
+        if failure is not None:
+            raise failure
+        if payload is None:
+            raise GitHubUpstreamError()
         user_id = payload.get("id")
         login = payload.get("login")
         if not isinstance(user_id, int) or not isinstance(login, str) or not login:
-            raise ValueError("GitHub response did not contain a valid user identity")
+            raise GitHubUpstreamError() from None
         return GitHubOAuthIdentity(user_id=f"github:{user_id}", login=login)
