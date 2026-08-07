@@ -77,10 +77,14 @@ class GitHubInstallationRow(Base):
     )
 
     user_access: Mapped[list[UserInstallationAccessRow]] = relationship(
-        back_populates="installation", cascade="all, delete-orphan"
+        back_populates="installation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     repositories: Mapped[list[RepositoryConnectionRow]] = relationship(
-        back_populates="installation"
+        back_populates="installation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
 
@@ -110,6 +114,7 @@ class OAuthStateRow(Base):
         PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
     )
     state_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    binding_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

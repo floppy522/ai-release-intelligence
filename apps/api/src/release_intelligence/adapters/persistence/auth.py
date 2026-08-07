@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 from sqlalchemy import delete, or_, select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -25,6 +28,7 @@ from release_intelligence.api.dependencies import (
     CurrentUser,
     SessionRecord,
 )
+from release_intelligence.ports.auth import AuthPersistenceError
 
 
 class AuthRepository:
@@ -39,22 +43,33 @@ class AuthRepository:
     async def close(self) -> None:
         await self._engine.dispose()
 
-    async def save_oauth_state(self, state_hash: str, expires_at: datetime) -> None:
+    async def save_oauth_state(
+        self, state_hash: str, binding_hash: str, expires_at: datetime
+    ) -> None:
         self._require_aware(expires_at)
-        async with self._sessions() as session, session.begin():
-            session.add(OAuthStateRow(state_hash=state_hash, expires_at=expires_at))
+        async with self._session(transaction=True) as session:
+            session.add(
+                OAuthStateRow(
+                    state_hash=state_hash,
+                    binding_hash=binding_hash,
+                    expires_at=expires_at,
+                )
+            )
 
-    async def consume_oauth_state(self, state_hash: str, consumed_at: datetime) -> bool:
+    async def consume_oauth_state(
+        self, state_hash: str, binding_hash: str, consumed_at: datetime
+    ) -> bool:
         self._require_aware(consumed_at)
         statement = (
             delete(OAuthStateRow)
             .where(
                 OAuthStateRow.state_hash == state_hash,
+                OAuthStateRow.binding_hash == binding_hash,
                 OAuthStateRow.expires_at > consumed_at,
             )
             .returning(OAuthStateRow.id)
         )
-        async with self._sessions() as session, session.begin():
+        async with self._session(transaction=True) as session:
             return (await session.scalar(statement)) is not None
 
     async def upsert_user_with_credential(
@@ -62,7 +77,7 @@ class AuthRepository:
     ) -> None:
         if not encrypted_credential:
             raise ValueError("encrypted credential is required")
-        async with self._sessions() as session, session.begin():
+        async with self._session(transaction=True) as session:
             await session.execute(
                 insert(UserRow)
                 .values(
@@ -82,7 +97,7 @@ class AuthRepository:
                 )
             )
             if user_row is None:
-                raise RuntimeError("user identity was not persisted")
+                raise AuthPersistenceError() from None
             await session.execute(
                 insert(EncryptedUserCredentialRow)
                 .values(
@@ -100,7 +115,7 @@ class AuthRepository:
 
     async def create_session(self, session_record: SessionRecord) -> None:
         self._require_aware(session_record.expires_at)
-        async with self._sessions() as session, session.begin():
+        async with self._session(transaction=True) as session:
             user_row = await self._user_row(session, session_record.user_id)
             session.add(
                 WebSessionRow(
@@ -123,7 +138,7 @@ class AuthRepository:
                 WebSessionRow.expires_at > accessed_at,
             )
         )
-        async with self._sessions() as session:
+        async with self._session() as session:
             row = (await session.execute(statement)).one_or_none()
         if row is None:
             return None
@@ -137,7 +152,7 @@ class AuthRepository:
         )
 
     async def delete_session(self, token_hash: str) -> None:
-        async with self._sessions() as session, session.begin():
+        async with self._session(transaction=True) as session:
             await session.execute(
                 delete(WebSessionRow).where(WebSessionRow.token_hash == token_hash)
             )
@@ -151,7 +166,7 @@ class AuthRepository:
         full_name: str,
     ) -> None:
         """Bind one selected repository to the user's GitHub App installation."""
-        async with self._sessions() as session, session.begin():
+        async with self._session(transaction=True) as session:
             user_row = await self._user_row(session, user_id)
             await session.execute(
                 insert(GitHubInstallationRow)
@@ -166,7 +181,7 @@ class AuthRepository:
                 )
             )
             if installation is None:
-                raise RuntimeError("GitHub installation was not persisted")
+                raise AuthPersistenceError() from None
             await session.execute(
                 insert(UserInstallationAccessRow)
                 .values(user_id=user_row.id, installation_id=installation.id)
@@ -212,7 +227,7 @@ class AuthRepository:
                 ),
             )
         )
-        async with self._sessions() as session:
+        async with self._session() as session:
             row = (await session.execute(statement)).one_or_none()
         if row is None:
             return None
@@ -232,8 +247,22 @@ class AuthRepository:
             )
         )
         if user is None:
-            raise KeyError(f"Unknown authenticated user: {user_id}")
+            raise AuthPersistenceError() from None
         return user
+
+    @asynccontextmanager
+    async def _session(
+        self, *, transaction: bool = False
+    ) -> AsyncIterator[AsyncSession]:
+        try:
+            async with self._sessions() as session:
+                if transaction:
+                    async with session.begin():
+                        yield session
+                else:
+                    yield session
+        except SQLAlchemyError:
+            raise AuthPersistenceError() from None
 
     @staticmethod
     def _require_aware(timestamp: datetime) -> None:

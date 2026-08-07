@@ -8,10 +8,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import asyncpg
+import httpx
 import pytest
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from release_intelligence.adapters.persistence.auth import AuthRepository
 from release_intelligence.api.dependencies import CurrentUser, SessionRecord
+from release_intelligence.config import AppSettings
+from release_intelligence.main import create_app
+from release_intelligence.security.crypto import token_digest
 
 API_ROOT = Path(__file__).resolve().parents[2]
 
@@ -54,6 +61,7 @@ async def auth_repository() -> AsyncIterator[AuthRepository]:
 @pytest.fixture
 async def postgres() -> AsyncIterator[asyncpg.Connection]:
     connection = await asyncpg.connect(_asyncpg_url(_database_url()))
+    await connection.execute("TRUNCATE TABLE oauth_states RESTART IDENTITY CASCADE")
     await connection.execute("TRUNCATE TABLE users RESTART IDENTITY CASCADE")
     await connection.execute(
         "TRUNCATE TABLE repository_connections RESTART IDENTITY CASCADE"
@@ -70,13 +78,36 @@ async def test_oauth_state_is_single_use_and_expiry_is_enforced(
 ) -> None:
     del postgres
     now = datetime(2026, 8, 7, 16, 0, tzinfo=UTC)
-    await auth_repository.save_oauth_state("state-hash", now + timedelta(minutes=10))
+    await auth_repository.save_oauth_state(
+        "state-hash", "binding-hash", now + timedelta(minutes=10)
+    )
 
-    assert await auth_repository.consume_oauth_state("state-hash", now) is True
-    assert await auth_repository.consume_oauth_state("state-hash", now) is False
+    assert (
+        await auth_repository.consume_oauth_state(
+            "state-hash", "wrong-binding", now
+        )
+        is False
+    )
+    assert (
+        await auth_repository.consume_oauth_state(
+            "state-hash", "binding-hash", now
+        )
+        is True
+    )
+    assert (
+        await auth_repository.consume_oauth_state(
+            "state-hash", "binding-hash", now
+        )
+        is False
+    )
 
-    await auth_repository.save_oauth_state("expired-state", now)
-    assert await auth_repository.consume_oauth_state("expired-state", now) is False
+    await auth_repository.save_oauth_state("expired-state", "binding-hash", now)
+    assert (
+        await auth_repository.consume_oauth_state(
+            "expired-state", "binding-hash", now
+        )
+        is False
+    )
 
 
 async def test_credentials_and_sessions_are_server_side_and_repository_access_is_bound(
@@ -130,3 +161,73 @@ async def test_credentials_and_sessions_are_server_side_and_repository_access_is
         )
         == 0
     )
+
+
+async def test_deleting_installation_cascades_repository_connection(
+    auth_repository: AuthRepository,
+    postgres: asyncpg.Connection,
+) -> None:
+    user = CurrentUser(id="github:7", login="octocat")
+    await auth_repository.upsert_user_with_credential(user, "fernet-ciphertext")
+    await auth_repository.connect_repository(
+        user_id=user.id,
+        installation_id=123,
+        repository_id="9001",
+        full_name="example/allowed",
+    )
+
+    await postgres.execute(
+        "DELETE FROM github_installations WHERE external_installation_id = 123"
+    )
+
+    assert await postgres.fetchval("SELECT count(*) FROM repository_connections") == 0
+
+
+async def test_production_lifespan_wires_real_postgresql_auth_repository(
+    postgres: asyncpg.Connection,
+) -> None:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_key_pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    settings = AppSettings(
+        database_url=_database_url(),
+        credential_encryption_key=Fernet.generate_key().decode(),
+        github_app_id="4242",
+        github_private_key_pem=private_key_pem,
+        github_client_id="client-id",
+        github_client_secret="client-secret",
+        session_ttl_seconds=3600,
+        oauth_state_ttl_seconds=120,
+    )
+    app = create_app(
+        settings=settings,
+        clock=lambda: datetime(2026, 8, 7, 16, 0, tzinfo=UTC),
+    )
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="https://testserver"
+        ) as client:
+            response = await client.get(
+                "/api/auth/github/login", follow_redirects=False
+            )
+
+        assert response.status_code == 307
+        state = httpx.URL(response.headers["location"]).params["state"]
+        binding = response.cookies["oauth_binding"]
+        stored = await postgres.fetchrow(
+            "SELECT state_hash, binding_hash, expires_at FROM oauth_states"
+        )
+        assert stored is not None
+        assert len(stored["state_hash"]) == 64
+        assert len(stored["binding_hash"]) == 64
+        assert stored["state_hash"] == token_digest(state)
+        assert stored["binding_hash"] == token_digest(binding)
+        assert state not in (stored["state_hash"], stored["binding_hash"])
+        assert binding not in (stored["state_hash"], stored["binding_hash"])
+        assert stored["expires_at"] == datetime(
+            2026, 8, 7, 16, 2, tzinfo=UTC
+        )
