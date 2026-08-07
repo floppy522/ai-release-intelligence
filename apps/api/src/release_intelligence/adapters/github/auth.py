@@ -12,7 +12,12 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from pydantic import SecretStr
 
-from release_intelligence.ports.github import GitHubHttpClient
+from release_intelligence.ports.github import (
+    GitHubHttpClient,
+    GitHubPartialData,
+    GitHubRateLimited,
+    GitHubUnauthorized,
+)
 
 
 class GitHubAuthorizationError(Exception):
@@ -85,7 +90,6 @@ class GitHubAppTokenProvider:
 
     async def installation_token(self, installation_id: int) -> SecretStr:
         token: object | None = None
-        failed = False
         try:
             response = await self._client.post(
                 f"/app/installations/{installation_id}/access_tokens",
@@ -97,10 +101,30 @@ class GitHubAppTokenProvider:
             )
             response.raise_for_status()
             token = response.json().get("token")
-        except (httpx.HTTPError, TypeError, ValueError, AttributeError):
-            failed = True
-        if failed or not isinstance(token, str) or not token:
-            raise GitHubUpstreamError()
+        except httpx.HTTPStatusError as error:
+            error_response = error.response
+            remaining = error_response.headers.get("X-RateLimit-Remaining")
+            if error_response.status_code == 429 or remaining == "0":
+                reset_at: datetime | None = None
+                raw_reset = error_response.headers.get("X-RateLimit-Reset")
+                try:
+                    reset_at = (
+                        datetime.fromtimestamp(int(raw_reset), UTC)
+                        if raw_reset is not None
+                        else None
+                    )
+                except (ValueError, OverflowError, OSError):
+                    reset_at = None
+                raise GitHubRateLimited(reset_at) from None
+            if error_response.status_code in (401, 403, 404):
+                raise GitHubUnauthorized() from None
+            raise GitHubPartialData() from None
+        except httpx.TransportError:
+            raise GitHubPartialData() from None
+        except (TypeError, ValueError, AttributeError):
+            raise GitHubPartialData() from None
+        if not isinstance(token, str) or not token:
+            raise GitHubPartialData()
         return SecretStr(token)
 
 

@@ -38,6 +38,8 @@ class ReleaseLink:
     issue_number: int
     pull_request_number: int
     url: str
+    source_id: str = ""
+    created_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +56,7 @@ class ReleaseSnapshot:
     issue_labels: tuple[str, ...]
     linked_pr_numbers: tuple[str, ...]
     issue_evidence: EvidenceRef
+    snapshot_version: str = "legacy"
     repository_id: str = "fixture"
     repository_full_name: str = "example/release-intelligence"
     fetch_started_at: datetime | None = None

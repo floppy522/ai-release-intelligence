@@ -35,6 +35,7 @@ from release_intelligence.config import AppSettings
 from release_intelligence.domain.models import ReadinessAssessment
 from release_intelligence.ports.auth import AuthPersistenceError
 from release_intelligence.ports.github import GitHubHttpClient
+from release_intelligence.ports.repositories import AnalysisRepositoryPort
 from release_intelligence.security.crypto import (
     CredentialCipher,
     digest_matches,
@@ -55,8 +56,15 @@ class ManagedGitHubHttpClient(GitHubHttpClient, Protocol):
     async def aclose(self) -> None: ...
 
 
+class ManagedAnalysisRepository(AnalysisRepositoryPort, Protocol):
+    pass
+
+
 AuthRepositoryFactory = Callable[[str], ManagedAuthStore]
 HttpClientFactory = Callable[[], ManagedGitHubHttpClient]
+AnalysisRepositoryFactory = Callable[
+    [str, Callable[[], datetime]], ManagedAnalysisRepository
+]
 
 
 def _auth_repository(database_url: str) -> ManagedAuthStore:
@@ -73,6 +81,12 @@ def _http_client() -> ManagedGitHubHttpClient:
     )
 
 
+def _analysis_repository(
+    database_url: str, clock: Callable[[], datetime]
+) -> ManagedAnalysisRepository:
+    return AnalysisRepository(database_url, clock=clock)
+
+
 def create_app(
     *,
     auth_store: AuthStore | None = None,
@@ -86,6 +100,7 @@ def create_app(
     oauth_state_ttl_seconds: int = DEFAULT_OAUTH_STATE_TTL_SECONDS,
     configure_auth: bool = True,
     analysis_service: AnalysisService | None = None,
+    analysis_repository_factory: AnalysisRepositoryFactory = _analysis_repository,
 ) -> FastAPI:
     effective_clock = clock or (lambda: datetime.now(UTC))
 
@@ -96,7 +111,7 @@ def create_app(
         credential_cipher = cipher
         owned_store: ManagedAuthStore | None = None
         owned_client: ManagedGitHubHttpClient | None = None
-        owned_analysis_repository: AnalysisRepository | None = None
+        owned_analysis_repository: ManagedAnalysisRepository | None = None
         configuration = settings
         configured_analysis_service = analysis_service
         try:
@@ -137,9 +152,9 @@ def create_app(
                 )
                 application.state.github_app_token_provider = token_provider
                 if configured_analysis_service is None:
-                    owned_analysis_repository = AnalysisRepository(
+                    owned_analysis_repository = analysis_repository_factory(
                         configuration.database_url.get_secret_value(),
-                        clock=effective_clock,
+                        effective_clock,
                     )
 
                     async def loader_factory(

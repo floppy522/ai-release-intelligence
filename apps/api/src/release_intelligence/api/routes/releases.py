@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-from typing import Annotated, cast
+from collections.abc import Callable
+from datetime import date, datetime
+from typing import Annotated, Self, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.exc import SQLAlchemyError
 
 from release_intelligence.api.dependencies import (
     AuthStore,
     CurrentUserDependency,
     get_auth_store,
+    get_clock,
     require_repository_access,
 )
 from release_intelligence.application.analyze_release import (
@@ -18,6 +21,7 @@ from release_intelligence.application.analyze_release import (
     AnalysisService,
     MissingCandidateRef,
     MissingMilestone,
+    assess,
 )
 from release_intelligence.domain.models import ReleaseSnapshot, ReleaseStatus
 from release_intelligence.ports.github import GitHubUnauthorized, RepoRef
@@ -33,6 +37,14 @@ class AnalysisCreateRequest(BaseModel):
         max_length=18,
         pattern=r"^release/\d{4}-\d{2}-\d{2}$",
     )
+
+    @model_validator(mode="after")
+    def validate_candidate_date(self) -> Self:
+        try:
+            date.fromisoformat(self.candidate_ref.removeprefix("release/"))
+        except ValueError:
+            raise ValueError("candidate_ref must contain a valid calendar date") from None
+        return self
 
 
 class AnalysisAccepted(BaseModel):
@@ -108,6 +120,7 @@ async def get_analysis(
     user: CurrentUserDependency,
     store: Annotated[AuthStore, Depends(get_auth_store)],
     service: Annotated[AnalysisService, Depends(get_analysis_service)],
+    clock: Annotated[Callable[[], datetime], Depends(get_clock)],
 ) -> AnalysisRunResponse:
     try:
         run = await service.get(run_id)
@@ -118,11 +131,24 @@ async def get_analysis(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Analysis persistence unavailable",
         ) from None
-    await require_repository_access(
-        user_id=user.id, repository_id=run.snapshot.repository_id, store=store
+    try:
+        await require_repository_access(
+            user_id=user.id, repository_id=run.snapshot.repository_id, store=store
+        )
+    except HTTPException as error:
+        if error.status_code == status.HTTP_403_FORBIDDEN:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "Analysis was not found"
+            ) from None
+        raise
+    freshness = assess(run.snapshot, policy=None, decisions=(), now=clock())
+    effective_status = (
+        ReleaseStatus.INSUFFICIENT_DATA
+        if freshness.status is ReleaseStatus.INSUFFICIENT_DATA
+        else run.assessment.status
     )
     return AnalysisRunResponse(
         run_id=run.id,
-        status=run.assessment.status,
+        status=effective_status,
         snapshot=run.snapshot,
     )

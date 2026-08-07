@@ -205,6 +205,41 @@ async def test_create_run_records_failed_audit_after_snapshot_insert_is_rejected
     assert await postgres.fetchval("SELECT count(*) FROM readiness_findings") == 0
 
 
+async def test_late_finding_failure_rolls_back_snapshot_and_records_failed_audit(
+    repository: AnalysisRepository,
+    fixture_run: CreateRunArguments,
+    postgres: asyncpg.Connection,
+) -> None:
+    """A failure after snapshot flush must not suppress the distinct FAILED audit."""
+    await postgres.execute(
+        """
+        CREATE FUNCTION reject_test_finding_insert() RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'test finding insert failure';
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER reject_test_finding_insert
+        BEFORE INSERT ON readiness_findings
+        FOR EACH ROW EXECUTE FUNCTION reject_test_finding_insert();
+        """
+    )
+    try:
+        with pytest.raises(DBAPIError, match="test finding insert failure"):
+            await repository.create_run(**fixture_run)
+    finally:
+        await postgres.execute(
+            "DROP TRIGGER IF EXISTS reject_test_finding_insert ON readiness_findings;"
+            "DROP FUNCTION IF EXISTS reject_test_finding_insert();"
+        )
+
+    assert await postgres.fetchval(
+        "SELECT count(*) FROM analysis_runs WHERE state = 'FAILED'"
+    ) == 1
+    assert await postgres.fetchval("SELECT count(*) FROM analysis_runs") == 1
+    assert await postgres.fetchval("SELECT count(*) FROM release_snapshots") == 0
+    assert await postgres.fetchval("SELECT count(*) FROM readiness_findings") == 0
+
+
 async def test_snapshot_update_is_rejected_and_original_audit_record_survives(
     repository: AnalysisRepository,
     fixture_run: CreateRunArguments,

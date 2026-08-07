@@ -19,6 +19,11 @@ from release_intelligence.adapters.github.auth import (
     GitHubUpstreamError,
 )
 from release_intelligence.config import AppSettings
+from release_intelligence.ports.github import (
+    GitHubPartialData,
+    GitHubRateLimited,
+    GitHubUnauthorized,
+)
 
 
 class FakeResponse:
@@ -70,11 +75,13 @@ def _decode_segment(segment: str) -> dict[str, object]:
     return json.loads(base64.urlsafe_b64decode(segment + padding))
 
 
-def _status_error(status_code: int) -> httpx.HTTPStatusError:
+def _status_error(
+    status_code: int, *, headers: dict[str, str] | None = None
+) -> httpx.HTTPStatusError:
     request = httpx.Request(
         "POST", "https://github.com/login/oauth/access_token?code=secret-code"
     )
-    response = httpx.Response(status_code, request=request)
+    response = httpx.Response(status_code, request=request, headers=headers)
     return httpx.HTTPStatusError("secret-code", request=request, response=response)
 
 
@@ -148,8 +155,49 @@ async def test_installation_token_rejects_malformed_github_response(
         client=client,
     )
 
-    with pytest.raises(GitHubUpstreamError, match="GitHub authentication unavailable"):
+    with pytest.raises(GitHubPartialData, match="incomplete"):
         await provider.installation_token(123)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "error_type"),
+    [(403, GitHubUnauthorized), (503, GitHubPartialData)],
+)
+async def test_installation_token_classifies_permission_and_availability(
+    private_key: SecretStr,
+    status_code: int,
+    error_type: type[Exception],
+) -> None:
+    client = FakeGitHubClient()
+    client.response = FakeResponse({}, _status_error(status_code))
+    provider = GitHubAppTokenProvider(
+        app_id="4242", private_key=private_key, client=client
+    )
+
+    with pytest.raises(error_type):
+        await provider.installation_token(123)
+
+
+async def test_installation_token_preserves_rate_limit_reset(
+    private_key: SecretStr,
+) -> None:
+    reset = 1786125600
+    client = FakeGitHubClient()
+    client.response = FakeResponse(
+        {},
+        _status_error(
+            429,
+            headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(reset)},
+        ),
+    )
+    provider = GitHubAppTokenProvider(
+        app_id="4242", private_key=private_key, client=client
+    )
+
+    with pytest.raises(GitHubRateLimited) as raised:
+        await provider.installation_token(123)
+
+    assert raised.value.reset_at == datetime.fromtimestamp(reset, UTC)
 
 
 @pytest.mark.parametrize(

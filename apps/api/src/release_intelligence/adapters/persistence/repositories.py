@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import cast
@@ -38,6 +39,8 @@ from release_intelligence.ports.repositories import (
     StoredAnalysisRun,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class AnalysisRepository:
     """PostgreSQL-backed storage for append-only release analysis runs."""
@@ -67,7 +70,6 @@ class AnalysisRepository:
         self._validate_run(findings, assessment, policy_version, source_fetched_at)
 
         started_at = self._clock_now()
-        snapshot_persisted = False
         try:
             async with self._sessions() as session:
                 async with session.begin():
@@ -93,7 +95,6 @@ class AnalysisRepository:
                         )
                     )
                     await session.flush()
-                    snapshot_persisted = True
                     for finding_position, finding in enumerate(findings):
                         finding_row = ReadinessFindingRow(
                             analysis_run=run,
@@ -118,8 +119,12 @@ class AnalysisRepository:
                             )
                 return run.id
         except SQLAlchemyError:
-            if not snapshot_persisted:
+            try:
                 await self._record_failed_run(snapshot, policy_version, source_fetched_at)
+            except Exception:  # noqa: BLE001 - never mask the original database error
+                # Preserve the original write failure; the audit attempt is best-effort
+                # when the database itself is unavailable.
+                logger.error("Failed analysis audit could not be persisted")
             raise
 
     async def get_run(self, run_id: UUID) -> StoredAnalysisRun:

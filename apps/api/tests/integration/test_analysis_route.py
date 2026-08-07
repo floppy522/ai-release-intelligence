@@ -25,7 +25,11 @@ from release_intelligence.domain.models import (
     SourceError,
 )
 from release_intelligence.main import create_app
-from release_intelligence.ports.github import GitHubUnauthorized
+from release_intelligence.ports.github import (
+    GitHubPartialData,
+    GitHubRateLimited,
+    GitHubUnauthorized,
+)
 from release_intelligence.ports.repositories import StoredAnalysisRun
 from release_intelligence.security.crypto import token_digest
 
@@ -51,6 +55,7 @@ def snapshot(
             url="https://github.com/example/release-intelligence/milestone/7",
             fingerprint="github:milestone:7:2026-08-07T14:30:00Z",
         ),
+        snapshot_version="github-v1",
         repository_id=REPOSITORY_ID,
         repository_full_name="example/release-intelligence",
         fetch_started_at=NOW,
@@ -109,11 +114,11 @@ class MemoryAnalysisRepository:
     def __init__(self, *, failure: bool = False) -> None:
         self.runs: dict[UUID, StoredAnalysisRun] = {}
         self.failure = failure
-        self.rolled_back = False
+        self.write_failed = False
 
     async def create_run(self, **values: Any) -> UUID:
         if self.failure:
-            self.rolled_back = True
+            self.write_failed = True
             raise SQLAlchemyError("database unavailable")
         run_id = uuid4()
         self.runs[run_id] = StoredAnalysisRun(
@@ -153,12 +158,15 @@ def store() -> FakeAuthStore:
 
 
 async def request_client(
-    analysis_service: AnalysisService, store: FakeAuthStore
+    analysis_service: AnalysisService,
+    store: FakeAuthStore,
+    *,
+    clock=lambda: NOW,
 ) -> httpx.AsyncClient:
     app = create_app(
         auth_store=store,
         analysis_service=analysis_service,
-        clock=lambda: NOW,
+        clock=clock,
         configure_auth=False,
     )
     return httpx.AsyncClient(
@@ -287,7 +295,7 @@ async def test_repository_and_github_authorization_failures_return_403(
     assert github_denied.status_code == 403
 
 
-async def test_database_failure_returns_503_after_repository_rollback(
+async def test_database_error_http_mapping_returns_503(
     store: FakeAuthStore,
 ) -> None:
     repository = MemoryAnalysisRepository(failure=True)
@@ -305,7 +313,46 @@ async def test_database_failure_returns_503_after_repository_rollback(
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Analysis persistence unavailable"}
-    assert repository.rolled_back is True
+    assert repository.write_failed is True
+
+
+@pytest.mark.parametrize(
+    "bootstrap_failure",
+    [GitHubPartialData(), GitHubRateLimited(NOW + timedelta(minutes=30))],
+)
+async def test_installation_token_availability_is_persisted_insufficient(
+    store: FakeAuthStore, bootstrap_failure: Exception
+) -> None:
+    repository = MemoryAnalysisRepository()
+
+    async def failing_factory(request: AnalysisRequest) -> FakeLoader:
+        del request
+        raise bootstrap_failure
+
+    analysis_service = AnalysisService(
+        loader_factory=failing_factory,
+        repository=repository,
+        clock=lambda: NOW,
+    )
+    async with await request_client(analysis_service, store) as client:
+        created = await client.post(
+            "/api/analyses",
+            json={
+                "repository_id": REPOSITORY_ID,
+                "milestone_number": 7,
+                "candidate_ref": "release/2026-08-10",
+            },
+        )
+        retrieved = await client.get(f"/api/analyses/{created.json()['run_id']}")
+
+    assert created.status_code == 202
+    assert retrieved.json()["status"] == "INSUFFICIENT_DATA"
+    error = retrieved.json()["snapshot"]["source_errors"][0]
+    if isinstance(bootstrap_failure, GitHubRateLimited):
+        assert error["code"] == "github.rate_limited"
+        assert error["reset_at"] is not None
+    else:
+        assert error["code"] == "github.partial_data"
 
 
 async def test_candidate_ref_must_use_release_date_format(
@@ -326,3 +373,74 @@ async def test_candidate_ref_must_use_release_date_format(
 
     assert response.status_code == 422
     assert loader.requests == []
+
+
+async def test_candidate_ref_rejects_impossible_calendar_date(
+    store: FakeAuthStore,
+) -> None:
+    loader = FakeLoader(snapshot())
+    async with await request_client(
+        service(loader, MemoryAnalysisRepository()), store
+    ) as client:
+        response = await client.post(
+            "/api/analyses",
+            json={
+                "repository_id": REPOSITORY_ID,
+                "milestone_number": 7,
+                "candidate_ref": "release/2026-02-31",
+            },
+        )
+
+    assert response.status_code == 422
+    assert loader.requests == []
+
+
+async def test_get_returns_effective_insufficient_when_stored_ready_is_stale(
+    store: FakeAuthStore,
+) -> None:
+    repository = MemoryAnalysisRepository()
+    analysis_service = service(FakeLoader(snapshot()), repository)
+    async with await request_client(analysis_service, store) as client:
+        created = await client.post(
+            "/api/analyses",
+            json={
+                "repository_id": REPOSITORY_ID,
+                "milestone_number": 7,
+                "candidate_ref": "release/2026-08-10",
+            },
+        )
+    stored = repository.runs[UUID(created.json()["run_id"])]
+    assert stored.assessment.status.value == "READY"
+
+    async with await request_client(
+        analysis_service,
+        store,
+        clock=lambda: NOW + timedelta(minutes=11),
+    ) as client:
+        retrieved = await client.get(f"/api/analyses/{stored.id}")
+
+    assert retrieved.status_code == 200
+    assert retrieved.json()["status"] == "INSUFFICIENT_DATA"
+    assert repository.runs[stored.id].assessment.status.value == "READY"
+
+
+async def test_missing_and_unauthorized_run_ids_are_indistinguishable(
+    store: FakeAuthStore,
+) -> None:
+    repository = MemoryAnalysisRepository()
+    analysis_service = service(FakeLoader(snapshot()), repository)
+    async with await request_client(analysis_service, store) as client:
+        created = await client.post(
+            "/api/analyses",
+            json={
+                "repository_id": REPOSITORY_ID,
+                "milestone_number": 7,
+                "candidate_ref": "release/2026-08-10",
+            },
+        )
+        missing = await client.get(f"/api/analyses/{uuid4()}")
+        store.allow_repository = False
+        unauthorized = await client.get(f"/api/analyses/{created.json()['run_id']}")
+
+    assert missing.status_code == unauthorized.status_code == 404
+    assert missing.json() == unauthorized.json()

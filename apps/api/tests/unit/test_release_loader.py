@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -13,7 +14,7 @@ from release_intelligence.application.analyze_release import (
     MissingMilestone,
     assess,
 )
-from release_intelligence.domain.models import ReleaseStatus
+from release_intelligence.domain.models import ReleaseStatus, SourceError
 from release_intelligence.ports.github import (
     CommitComparison,
     GitHubCheck,
@@ -135,6 +136,10 @@ class FakeSource:
         self.milestones = [milestone(), milestone(), milestone(), milestone()]
         self.item_sets = [(issue(),), (issue(),), (issue(),), (issue(),)]
         self.refs = ["candidate-sha"] * 4
+        self.timelines = [(timeline_event(),)] * 4
+        self.pulls = [pull_request()] * 4
+        self.check_sets = [(check(),)] * 4
+        self.comparison_sets = [comparison()] * 4
 
     def _take(self, name: str) -> None:
         self.calls[name] += 1
@@ -158,14 +163,14 @@ class FakeSource:
     ) -> tuple[GitHubIssueTimelineEvent, ...]:
         del repo, issue_number
         self._take("timeline")
-        return (timeline_event(),)
+        return self.timelines[min(self.calls["timeline"] - 1, len(self.timelines) - 1)]
 
     async def get_pull_request(
         self, repo: RepoRef, pull_number: int
     ) -> GitHubPullRequest:
         del repo, pull_number
         self._take("pull")
-        return pull_request()
+        return self.pulls[min(self.calls["pull"] - 1, len(self.pulls) - 1)]
 
     async def resolve_ref(self, repo: RepoRef, ref: str) -> str:
         del repo, ref
@@ -177,14 +182,16 @@ class FakeSource:
     ) -> tuple[GitHubCheck, ...]:
         del repo, ref
         self._take("checks")
-        return (check(),)
+        return self.check_sets[min(self.calls["checks"] - 1, len(self.check_sets) - 1)]
 
     async def compare_commits(
         self, repo: RepoRef, base: str, head: str
     ) -> CommitComparison:
         del repo, base, head
         self._take("comparison")
-        return comparison()
+        return self.comparison_sets[
+            min(self.calls["comparison"] - 1, len(self.comparison_sets) - 1)
+        ]
 
 
 async def test_complete_loader_captures_normalized_evidence_window() -> None:
@@ -243,23 +250,81 @@ async def test_rate_limit_reset_is_preserved_as_source_metadata() -> None:
 async def test_loader_reconciles_one_changed_window_then_succeeds() -> None:
     source = FakeSource()
     source.refs = ["old-sha", "new-sha", "candidate-sha", "candidate-sha"]
+    source.check_sets = [
+        (replace(check(), head_sha=sha),) for sha in source.refs
+    ]
 
     snapshot = await GitHubReleaseLoader(source, clock=lambda: NOW).load(REQUEST)
 
     assert snapshot.complete is True
     assert snapshot.candidate_sha == "candidate-sha"
-    assert source.calls["checks"] == 2
+    assert source.calls["checks"] == 4
 
 
 async def test_loader_fails_closed_after_second_inconsistent_window() -> None:
     source = FakeSource()
     source.refs = ["a", "b", "c", "d"]
+    source.check_sets = [
+        (replace(check(), head_sha=sha),) for sha in source.refs
+    ]
 
     snapshot = await GitHubReleaseLoader(source, clock=lambda: NOW).load(REQUEST)
 
     assert snapshot.complete is False
     assert snapshot.source_errors[0].code == "github.inconsistent_state"
-    assert source.calls["checks"] == 2
+    assert source.calls["checks"] == 4
+
+
+@pytest.mark.parametrize(
+    "component",
+    ["milestone", "items", "timeline", "pull", "checks", "comparison"],
+)
+async def test_loader_fails_closed_when_any_material_evidence_keeps_changing(
+    component: str,
+) -> None:
+    source = FakeSource()
+    if component == "milestone":
+        changed = milestone(updated_at=NOW + timedelta(seconds=1))
+        source.milestones = [milestone(), changed, milestone(), changed]
+    elif component == "items":
+        changed = issue(updated_at=NOW + timedelta(seconds=1))
+        source.item_sets = [(issue(),), (changed,), (issue(),), (changed,)]
+    elif component == "timeline":
+        changed = replace(
+            timeline_event(), created_at=NOW - timedelta(days=2, seconds=1)
+        )
+        source.timelines = [
+            (timeline_event(),),
+            (changed,),
+            (timeline_event(),),
+            (changed,),
+        ]
+    elif component == "pull":
+        changed = replace(pull_request(), updated_at=NOW)
+        source.pulls = [pull_request(), changed, pull_request(), changed]
+    elif component == "checks":
+        changed = replace(check(), conclusion="failure")
+        source.check_sets = [(check(),), (changed,), (check(),), (changed,)]
+    else:
+        changed = replace(comparison(), status="diverged")
+        source.comparison_sets = [comparison(), changed, comparison(), changed]
+
+    loaded = await GitHubReleaseLoader(source, clock=lambda: NOW).load(REQUEST)
+
+    assert loaded.complete is False
+    assert loaded.source_errors[0].code == "github.inconsistent_state"
+
+
+async def test_loader_retries_whole_material_window_then_uses_stable_evidence() -> None:
+    source = FakeSource()
+    failed = replace(check(), conclusion="failure")
+    source.check_sets = [(check(),), (failed,), (check(),), (check(),)]
+
+    loaded = await GitHubReleaseLoader(source, clock=lambda: NOW).load(REQUEST)
+
+    assert loaded.complete is True
+    assert loaded.checks[0].conclusion == "success"
+    assert source.calls["checks"] == 4
 
 
 async def test_loader_fails_closed_before_expanding_oversized_milestone() -> None:
@@ -273,6 +338,40 @@ async def test_loader_fails_closed_before_expanding_oversized_milestone() -> Non
     assert source.calls["timeline"] == 0
 
 
+async def test_loader_deduplicates_semantically_identical_timeline_links() -> None:
+    source = FakeSource()
+    duplicates = (timeline_event(), replace(timeline_event(), source_id="901"))
+    source.timelines = [duplicates] * 4
+
+    loaded = await GitHubReleaseLoader(source, clock=lambda: NOW).load(REQUEST)
+
+    assert loaded.complete is True
+    assert len(loaded.links) == 1
+
+
+async def test_loader_fails_closed_at_timeline_fanout_cap() -> None:
+    source = FakeSource()
+    fanout = tuple(
+        replace(
+            timeline_event(),
+            source_id=str(900 + number),
+            pull_request_number=1000 + number,
+            pull_request_url=(
+                "https://github.com/example/release-intelligence/pull/"
+                f"{1000 + number}"
+            ),
+        )
+        for number in range(201)
+    )
+    source.timelines = [fanout] * 4
+
+    loaded = await GitHubReleaseLoader(source, clock=lambda: NOW).load(REQUEST)
+
+    assert loaded.complete is False
+    assert loaded.source_errors[0].code == "github.partial_data"
+    assert source.calls["pull"] == 0
+
+
 async def test_snapshot_older_than_ten_minutes_is_insufficient() -> None:
     source = FakeSource()
     snapshot = await GitHubReleaseLoader(source, clock=lambda: NOW).load(REQUEST)
@@ -283,6 +382,44 @@ async def test_snapshot_older_than_ten_minutes_is_insufficient() -> None:
         decisions=(),
         now=snapshot.fetched_at + timedelta(minutes=11),
     )
+
+    assert assessment.status is ReleaseStatus.INSUFFICIENT_DATA
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        lambda value: replace(value, fetched_at=None),
+        lambda value: replace(value, fetched_at=NOW + timedelta(minutes=1)),
+        lambda value: replace(
+            value,
+            fetch_started_at=NOW + timedelta(seconds=1),
+            fetched_at=NOW,
+        ),
+        lambda value: replace(
+            value,
+            source_errors=(
+                SourceError(code="github.partial_data", message="partial"),
+            ),
+        ),
+        lambda value: replace(value, fetched_at=NOW.replace(tzinfo=None)),
+        lambda value: replace(value, candidate_ref=""),
+        lambda value: replace(value, candidate_sha=""),
+    ],
+    ids=[
+        "missing-fetched-at",
+        "future",
+        "inverted-window",
+        "errors",
+        "naive",
+        "missing-candidate-ref",
+        "missing-candidate-sha",
+    ],
+)
+async def test_normalized_snapshot_metadata_contradictions_fail_closed(corrupt) -> None:
+    complete = await GitHubReleaseLoader(FakeSource(), clock=lambda: NOW).load(REQUEST)
+
+    assessment = assess(corrupt(complete), policy=None, decisions=(), now=NOW)
 
     assert assessment.status is ReleaseStatus.INSUFFICIENT_DATA
 

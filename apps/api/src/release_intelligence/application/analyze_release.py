@@ -18,12 +18,14 @@ from release_intelligence.domain.models import (
     SourceError,
 )
 from release_intelligence.ports.github import (
+    GitHubCheck,
     GitHubError,
     GitHubItem,
     GitHubItemKind,
     GitHubMilestone,
     GitHubNotFound,
     GitHubPartialData,
+    GitHubPullRequest,
     GitHubRateLimited,
     GitHubSource,
     GitHubUnauthorized,
@@ -79,8 +81,31 @@ class AnalysisService:
     async def run(self, request: AnalysisRequest, actor: str) -> UUID:
         if not actor:
             raise ValueError("actor is required")
-        loader = await self._loader_factory(request)
-        snapshot = await loader.load(request)
+        bootstrap_started_at = self._now()
+        try:
+            loader = await self._loader_factory(request)
+            snapshot = await loader.load(request)
+        except GitHubRateLimited as error:
+            snapshot = _unavailable_snapshot(
+                request,
+                bootstrap_started_at,
+                self._now(),
+                SourceError(
+                    code="github.rate_limited",
+                    message="GitHub rate limit prevented a complete snapshot",
+                    reset_at=error.reset_at,
+                ),
+            )
+        except GitHubPartialData:
+            snapshot = _unavailable_snapshot(
+                request,
+                bootstrap_started_at,
+                self._now(),
+                SourceError(
+                    code="github.partial_data",
+                    message="GitHub returned incomplete release evidence",
+                ),
+            )
         now = self._now()
         assessment = assess(snapshot, policy=None, decisions=(), now=now)
         source_fetched_at = snapshot.fetched_at
@@ -104,6 +129,17 @@ class AnalysisService:
         return value.astimezone(UTC)
 
 
+@dataclass(frozen=True, slots=True)
+class _EvidenceWindow:
+    milestone: GitHubMilestone
+    items: tuple[GitHubItem, ...]
+    candidate_sha: str
+    links: tuple[ReleaseLink, ...]
+    pull_requests: tuple[GitHubPullRequest, ...]
+    checks: tuple[GitHubCheck, ...]
+    comparisons: tuple[PullRequestComparison, ...]
+
+
 class GitHubReleaseLoader:
     """Load one bounded, internally consistent, normalized GitHub evidence window."""
 
@@ -118,10 +154,11 @@ class GitHubReleaseLoader:
 
     async def load(self, request: AnalysisRequest) -> ReleaseSnapshot:
         fetch_started_at = self._now()
-        latest: ReleaseSnapshot | None = None
+        latest: _EvidenceWindow | None = None
         for _attempt in range(2):
             try:
-                latest, consistent = await self._load_once(request, fetch_started_at)
+                first = await self._collect_window(request)
+                second = await self._collect_window(request)
             except GitHubRateLimited as error:
                 return self._incomplete(
                     request,
@@ -143,11 +180,12 @@ class GitHubReleaseLoader:
                         message="GitHub returned incomplete release evidence",
                     ),
                 )
-            if consistent:
-                return latest
+            latest = second
+            if first == second:
+                return self._snapshot(request, fetch_started_at, second)
         assert latest is not None
         return replace(
-            latest,
+            self._snapshot(request, fetch_started_at, latest),
             complete=False,
             source_errors=(
                 SourceError(
@@ -158,35 +196,48 @@ class GitHubReleaseLoader:
             fetched_at=self._now(),
         )
 
-    async def _load_once(
-        self, request: AnalysisRequest, fetch_started_at: datetime
-    ) -> tuple[ReleaseSnapshot, bool]:
-        milestone_before = await self._get_milestone(request)
-        items_before = await self._source.list_milestone_items(
+    async def _collect_window(self, request: AnalysisRequest) -> _EvidenceWindow:
+        milestone = await self._get_milestone(request)
+        items = await self._source.list_milestone_items(
             request.repository, request.milestone_number
         )
-        if len(items_before) > MAX_MILESTONE_ITEMS:
+        if len(items) > MAX_MILESTONE_ITEMS:
             raise GitHubPartialData()
-        candidate_before = await self._resolve_candidate(request)
+        candidate_sha = await self._resolve_candidate(request)
 
         links: list[ReleaseLink] = []
+        seen_links: set[tuple[int, int, str]] = set()
+        event_count = 0
         pull_numbers = {
             item.number
-            for item in items_before
+            for item in items
             if item.kind is GitHubItemKind.PULL_REQUEST
         }
-        for item in items_before:
+        for item in items:
             if item.kind is not GitHubItemKind.ISSUE:
                 continue
             events = await self._source.list_issue_timeline(
                 request.repository, item.number
             )
             for event in events:
+                event_count += 1
+                if event_count > MAX_RELATED_PULL_REQUESTS:
+                    raise GitHubPartialData()
+                link_key = (
+                    item.number,
+                    event.pull_request_number,
+                    event.pull_request_url,
+                )
+                if link_key in seen_links:
+                    continue
+                seen_links.add(link_key)
                 links.append(
                     ReleaseLink(
+                        source_id=event.source_id,
                         issue_number=item.number,
                         pull_request_number=event.pull_request_number,
                         url=event.pull_request_url,
+                        created_at=event.created_at,
                     )
                 )
                 pull_numbers.add(event.pull_request_number)
@@ -199,16 +250,18 @@ class GitHubReleaseLoader:
             ]
         )
         checks = await self._source.list_checks_for_ref(
-            request.repository, candidate_before
+            request.repository, candidate_sha
         )
-        if len(checks) > MAX_CANDIDATE_CHECKS:
+        if len(checks) > MAX_CANDIDATE_CHECKS or any(
+            check.head_sha != candidate_sha for check in checks
+        ):
             raise GitHubPartialData()
         comparisons = tuple(
             [
                 PullRequestComparison(
                     pull_request_number=pull.number,
                     comparison=await self._source.compare_commits(
-                        request.repository, pull.merge_commit_sha, candidate_before
+                        request.repository, pull.merge_commit_sha, candidate_sha
                     ),
                 )
                 for pull in pulls
@@ -216,23 +269,28 @@ class GitHubReleaseLoader:
             ]
         )
 
-        milestone_after = await self._get_milestone(request)
-        items_after = await self._source.list_milestone_items(
-            request.repository, request.milestone_number
+        return _EvidenceWindow(
+            milestone=milestone,
+            items=items,
+            candidate_sha=candidate_sha,
+            links=tuple(links),
+            pull_requests=pulls,
+            checks=checks,
+            comparisons=comparisons,
         )
-        candidate_after = await self._resolve_candidate(request)
-        consistent = (
-            milestone_before == milestone_after
-            and items_before == items_after
-            and candidate_before == candidate_after
-            and all(check.head_sha == candidate_before for check in checks)
-        )
+
+    def _snapshot(
+        self,
+        request: AnalysisRequest,
+        fetch_started_at: datetime,
+        window: _EvidenceWindow,
+    ) -> ReleaseSnapshot:
         issue_item = next(
-            (item for item in items_before if item.kind is GitHubItemKind.ISSUE), None
+            (item for item in window.items if item.kind is GitHubItemKind.ISSUE), None
         )
         linked = tuple(
             str(link.pull_request_number)
-            for link in links
+            for link in window.links
             if issue_item is not None and link.issue_number == issue_item.number
         )
         snapshot = ReleaseSnapshot(
@@ -242,23 +300,24 @@ class GitHubReleaseLoader:
             issue_labels=issue_item.labels if issue_item is not None else (),
             linked_pr_numbers=linked,
             issue_evidence=self._issue_evidence(issue_item),
+            snapshot_version="github-v1",
             repository_id=request.repository_id,
             repository_full_name=(
                 f"{request.repository.owner}/{request.repository.name}"
             ),
             fetch_started_at=fetch_started_at,
             fetched_at=self._now(),
-            complete=consistent,
+            complete=True,
             source_errors=(),
             candidate_ref=request.candidate_ref,
-            candidate_sha=candidate_before,
-            items=items_before,
-            links=tuple(links),
-            pull_requests=pulls,
-            checks=checks,
-            comparisons=comparisons,
+            candidate_sha=window.candidate_sha,
+            items=window.items,
+            links=window.links,
+            pull_requests=window.pull_requests,
+            checks=window.checks,
+            comparisons=window.comparisons,
         )
-        return snapshot, consistent
+        return snapshot
 
     async def _get_milestone(self, request: AnalysisRequest) -> GitHubMilestone:
         try:
@@ -282,33 +341,7 @@ class GitHubReleaseLoader:
         fetch_started_at: datetime,
         error: SourceError,
     ) -> ReleaseSnapshot:
-        return ReleaseSnapshot(
-            release_name=f"Milestone {request.milestone_number}",
-            issue_number="",
-            milestone_number=request.milestone_number,
-            issue_labels=(),
-            linked_pr_numbers=(),
-            issue_evidence=EvidenceRef(
-                evidence_id="github-release-unavailable",
-                source_type="github_release",
-                source_id=str(request.milestone_number),
-                url=(
-                    f"https://github.com/{request.repository.owner}/"
-                    f"{request.repository.name}/milestone/{request.milestone_number}"
-                ),
-                fingerprint=f"github:milestone:{request.milestone_number}:unavailable",
-            ),
-            repository_id=request.repository_id,
-            repository_full_name=(
-                f"{request.repository.owner}/{request.repository.name}"
-            ),
-            fetch_started_at=fetch_started_at,
-            fetched_at=self._now(),
-            complete=False,
-            source_errors=(error,),
-            candidate_ref=request.candidate_ref,
-            candidate_sha="",
-        )
+        return _unavailable_snapshot(request, fetch_started_at, self._now(), error)
 
     def _now(self) -> datetime:
         timestamp = self._clock()
@@ -335,6 +368,42 @@ class GitHubReleaseLoader:
         )
 
 
+def _unavailable_snapshot(
+    request: AnalysisRequest,
+    fetch_started_at: datetime,
+    fetched_at: datetime,
+    error: SourceError,
+) -> ReleaseSnapshot:
+    return ReleaseSnapshot(
+        release_name=f"Milestone {request.milestone_number}",
+        issue_number="",
+        milestone_number=request.milestone_number,
+        issue_labels=(),
+        linked_pr_numbers=(),
+        issue_evidence=EvidenceRef(
+            evidence_id="github-release-unavailable",
+            source_type="github_release",
+            source_id=str(request.milestone_number),
+            url=(
+                f"https://github.com/{request.repository.owner}/"
+                f"{request.repository.name}/milestone/{request.milestone_number}"
+            ),
+            fingerprint=f"github:milestone:{request.milestone_number}:unavailable",
+        ),
+        snapshot_version="github-v1",
+        repository_id=request.repository_id,
+        repository_full_name=(
+            f"{request.repository.owner}/{request.repository.name}"
+        ),
+        fetch_started_at=fetch_started_at,
+        fetched_at=fetched_at,
+        complete=False,
+        source_errors=(error,),
+        candidate_ref=request.candidate_ref,
+        candidate_sha="",
+    )
+
+
 def assess_fixture_release() -> ReadinessAssessment:
     return assess_release(load_demo_release())
 
@@ -347,15 +416,37 @@ def assess(
     now: datetime,
 ) -> ReadinessAssessment:
     del policy, decisions
-    if not snapshot.complete:
+    if snapshot.snapshot_version == "legacy":
+        return assess_release(snapshot)
+    if now.tzinfo is None:
         return ReadinessAssessment(
             status=ReleaseStatus.INSUFFICIENT_DATA, findings=()
         )
-    if snapshot.fetched_at is not None:
-        if snapshot.fetched_at.tzinfo is None or now.tzinfo is None:
-            raise ValueError("snapshot and assessment times must be timezone-aware")
-        if now.astimezone(UTC) - snapshot.fetched_at.astimezone(UTC) > MAX_SNAPSHOT_AGE:
-            return ReadinessAssessment(
-                status=ReleaseStatus.INSUFFICIENT_DATA, findings=()
-            )
+    if (
+        not snapshot.complete
+        or snapshot.source_errors
+        or snapshot.fetch_started_at is None
+        or snapshot.fetched_at is None
+        or snapshot.fetch_started_at.tzinfo is None
+        or snapshot.fetched_at.tzinfo is None
+        or not snapshot.candidate_ref
+        or not snapshot.candidate_sha
+        or snapshot.milestone_number <= 0
+        or not snapshot.repository_id
+        or not snapshot.repository_full_name
+    ):
+        return ReadinessAssessment(
+            status=ReleaseStatus.INSUFFICIENT_DATA, findings=()
+        )
+    started_at = snapshot.fetch_started_at.astimezone(UTC)
+    fetched_at = snapshot.fetched_at.astimezone(UTC)
+    effective_now = now.astimezone(UTC)
+    if (
+        started_at > fetched_at
+        or fetched_at > effective_now
+        or effective_now - fetched_at > MAX_SNAPSHOT_AGE
+    ):
+        return ReadinessAssessment(
+            status=ReleaseStatus.INSUFFICIENT_DATA, findings=()
+        )
     return assess_release(snapshot)

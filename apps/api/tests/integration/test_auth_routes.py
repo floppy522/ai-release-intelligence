@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -23,8 +24,14 @@ from release_intelligence.api.dependencies import (
     SessionRecord,
 )
 from release_intelligence.config import AppSettings
+from release_intelligence.domain.models import (
+    ReadinessAssessment,
+    ReadinessFinding,
+    ReleaseSnapshot,
+)
 from release_intelligence.main import create_app
 from release_intelligence.ports.auth import AuthPersistenceError
+from release_intelligence.ports.repositories import StoredAnalysisRun
 from release_intelligence.security.crypto import CredentialCipher, token_digest
 
 
@@ -129,6 +136,56 @@ class FakeSharedHttpClient:
         raise AssertionError(f"unexpected GitHub POST: {path}, {kwargs}")
 
     async def aclose(self) -> None:
+        self.closed = True
+
+
+class RateLimitedTokenHttpClient(FakeSharedHttpClient):
+    async def post(self, path: str, **kwargs: object) -> httpx.Response:
+        del kwargs
+        request = httpx.Request("POST", f"https://api.github.com{path}")
+        return httpx.Response(
+            429,
+            request=request,
+            json={"message": "rate limited"},
+            headers={
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "1786125600",
+            },
+        )
+
+
+class FakeManagedAnalysisRepository:
+    def __init__(self) -> None:
+        self.runs: dict[UUID, StoredAnalysisRun] = {}
+        self.closed = False
+
+    async def create_run(self, **values: Any) -> UUID:
+        run_id = uuid4()
+        findings = values["findings"]
+        assert isinstance(findings, tuple)
+        snapshot = values["snapshot"]
+        assessment = values["assessment"]
+        assert isinstance(snapshot, ReleaseSnapshot)
+        assert isinstance(assessment, ReadinessAssessment)
+        assert all(isinstance(item, ReadinessFinding) for item in findings)
+        self.runs[run_id] = StoredAnalysisRun(
+            id=run_id,
+            snapshot=snapshot,
+            findings=findings,
+            assessment=assessment,
+            policy_version=values["policy_version"],
+            source_fetched_at=values["source_fetched_at"],
+        )
+        return run_id
+
+    async def get_run(self, run_id: UUID) -> StoredAnalysisRun:
+        return self.runs[run_id]
+
+    async def replace_snapshot(self, run_id: UUID, snapshot: ReleaseSnapshot) -> None:
+        del run_id, snapshot
+        raise AssertionError("snapshots are immutable")
+
+    async def close(self) -> None:
         self.closed = True
 
 
@@ -443,6 +500,63 @@ async def test_settings_lifespan_wires_auth_and_closes_shared_resources(
 
     assert store.closed is True
     assert shared_client.closed is True
+
+
+async def test_production_wiring_persists_token_rate_limit_without_exposing_token(
+    private_key_pem: str,
+    clock: Clock,
+    cipher: CredentialCipher,
+) -> None:
+    store = FakeAuthStore()
+    oauth = FakeOAuthGateway()
+    shared_client = RateLimitedTokenHttpClient()
+    repository = FakeManagedAnalysisRepository()
+    settings = AppSettings(
+        database_url="postgresql+asyncpg://postgres:postgres@localhost/test",
+        credential_encryption_key=Fernet.generate_key().decode(),
+        github_app_id="4242",
+        github_private_key_pem=private_key_pem,
+        github_client_id="client-id",
+        github_client_secret="client-secret",
+    )
+    app = create_app(
+        settings=settings,
+        auth_store=store,
+        oauth_gateway=oauth,
+        cipher=cipher,
+        clock=clock,
+        http_client_factory=lambda: shared_client,
+        analysis_repository_factory=lambda _url, _clock: repository,
+    )
+
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://testserver"
+    ) as client:
+        csrf_token, _ = await _login(client)
+        store.repository_access[("github:7", "987654")] = AuthorizedRepository(
+            repository_id="987654",
+            full_name="example/release-intelligence",
+            installation_id=123,
+        )
+        created = await client.post(
+            "/api/analyses",
+            headers={"X-CSRF-Token": csrf_token},
+            json={
+                "repository_id": "987654",
+                "milestone_number": 7,
+                "candidate_ref": "release/2026-08-10",
+            },
+        )
+
+    assert created.status_code == 202
+    stored = repository.runs[UUID(created.json()["run_id"])]
+    assert stored.assessment.status.value == "INSUFFICIENT_DATA"
+    assert stored.snapshot.source_errors[0].code == "github.rate_limited"
+    assert stored.snapshot.source_errors[0].reset_at == datetime.fromtimestamp(
+        1786125600, UTC
+    )
+    assert not hasattr(repository, "installation_token")
+    assert repository.closed is True
 
 
 def test_deployment_key_hashing_contract_does_not_store_session_or_csrf_tokens() -> (
