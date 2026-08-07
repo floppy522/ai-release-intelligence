@@ -45,7 +45,11 @@ jobs:
         run: uv run alembic upgrade head
       - name: Run focused PostgreSQL persistence contracts
         working-directory: apps/api
-        run: uv run pytest tests/integration/test_analysis_repository.py -v
+        run: >-
+          uv run pytest
+          tests/integration/test_analysis_repository.py
+          tests/integration/test_policy_repository.py
+          -v
       - name: Run backend test suite
         working-directory: apps/api
         run: uv run pytest -v -W error

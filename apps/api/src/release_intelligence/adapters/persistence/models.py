@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
@@ -159,6 +160,18 @@ class ReleasePolicyRow(Base):
     __tablename__ = "release_policies"
     __table_args__ = (
         UniqueConstraint("repository_id", "version", name="uq_release_policy_version"),
+        UniqueConstraint(
+            "repository_id",
+            "configuration_version",
+            name="uq_repository_policy_configuration_version",
+        ),
+        CheckConstraint(
+            "(configuration_version IS NULL AND policy_payload IS NULL) OR "
+            "(configuration_version IS NOT NULL AND configuration_version > 0 "
+            "AND policy_payload IS NOT NULL "
+            "AND jsonb_typeof(policy_payload) = 'object')",
+            name="ck_release_policy_configuration_payload",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -168,6 +181,12 @@ class ReleasePolicyRow(Base):
         ForeignKey("repository_connections.id", ondelete="CASCADE"), nullable=False
     )
     version: Mapped[str] = mapped_column(String(128), nullable=False)
+    configuration_version: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    policy_payload: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB, nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -15,6 +15,7 @@ from release_intelligence.adapters.github.auth import (
 )
 from release_intelligence.adapters.github.client import GitHubRestClient
 from release_intelligence.adapters.persistence.auth import AuthRepository
+from release_intelligence.adapters.persistence.policies import PolicyRepository
 from release_intelligence.adapters.persistence.repositories import AnalysisRepository
 from release_intelligence.api.dependencies import (
     AuthStore,
@@ -23,6 +24,7 @@ from release_intelligence.api.dependencies import (
 )
 from release_intelligence.api.routes.auth import router as auth_router
 from release_intelligence.api.routes.releases import router as releases_router
+from release_intelligence.api.routes.repositories import router as repositories_router
 from release_intelligence.api.schemas import AssessmentResponse
 from release_intelligence.application.analyze_release import (
     AnalysisRequest,
@@ -35,6 +37,7 @@ from release_intelligence.config import AppSettings
 from release_intelligence.domain.models import ReadinessAssessment
 from release_intelligence.ports.auth import AuthPersistenceError
 from release_intelligence.ports.github import GitHubHttpClient
+from release_intelligence.ports.policies import PolicyRepositoryPort
 from release_intelligence.ports.repositories import AnalysisRepositoryPort
 from release_intelligence.security.crypto import (
     CredentialCipher,
@@ -60,11 +63,16 @@ class ManagedAnalysisRepository(AnalysisRepositoryPort, Protocol):
     pass
 
 
+class ManagedPolicyRepository(PolicyRepositoryPort, Protocol):
+    async def close(self) -> None: ...
+
+
 AuthRepositoryFactory = Callable[[str], ManagedAuthStore]
 HttpClientFactory = Callable[[], ManagedGitHubHttpClient]
 AnalysisRepositoryFactory = Callable[
     [str, Callable[[], datetime]], ManagedAnalysisRepository
 ]
+PolicyRepositoryFactory = Callable[[str], ManagedPolicyRepository]
 
 
 def _auth_repository(database_url: str) -> ManagedAuthStore:
@@ -87,6 +95,10 @@ def _analysis_repository(
     return AnalysisRepository(database_url, clock=clock)
 
 
+def _policy_repository(database_url: str) -> ManagedPolicyRepository:
+    return PolicyRepository(database_url)
+
+
 def create_app(
     *,
     auth_store: AuthStore | None = None,
@@ -101,6 +113,8 @@ def create_app(
     configure_auth: bool = True,
     analysis_service: AnalysisService | None = None,
     analysis_repository_factory: AnalysisRepositoryFactory = _analysis_repository,
+    policy_store: PolicyRepositoryPort | None = None,
+    policy_repository_factory: PolicyRepositoryFactory = _policy_repository,
 ) -> FastAPI:
     effective_clock = clock or (lambda: datetime.now(UTC))
 
@@ -112,8 +126,10 @@ def create_app(
         owned_store: ManagedAuthStore | None = None
         owned_client: ManagedGitHubHttpClient | None = None
         owned_analysis_repository: ManagedAnalysisRepository | None = None
+        owned_policy_repository: ManagedPolicyRepository | None = None
         configuration = settings
         configured_analysis_service = analysis_service
+        configured_policy_store = policy_store
         try:
             install_access_log_redaction()
             if configure_auth and (
@@ -174,15 +190,25 @@ def create_app(
                         repository=owned_analysis_repository,
                         clock=effective_clock,
                     )
+                if configured_policy_store is None:
+                    owned_policy_repository = policy_repository_factory(
+                        configuration.database_url.get_secret_value()
+                    )
+                    configured_policy_store = owned_policy_repository
             application.state.auth_store = store
             application.state.oauth_gateway = gateway
             application.state.credential_cipher = credential_cipher
             application.state.analysis_service = configured_analysis_service
+            application.state.policy_store = configured_policy_store
             yield
         finally:
             try:
-                if owned_analysis_repository is not None:
-                    await owned_analysis_repository.close()
+                try:
+                    if owned_policy_repository is not None:
+                        await owned_policy_repository.close()
+                finally:
+                    if owned_analysis_repository is not None:
+                        await owned_analysis_repository.close()
             finally:
                 try:
                     if owned_client is not None:
@@ -200,6 +226,8 @@ def create_app(
     application.state.session_ttl_seconds = session_ttl_seconds
     application.state.oauth_state_ttl_seconds = oauth_state_ttl_seconds
     application.state.analysis_service = analysis_service
+    application.state.policy_store = policy_store
+    application.include_router(repositories_router)
     application.include_router(auth_router)
     application.include_router(releases_router)
 
