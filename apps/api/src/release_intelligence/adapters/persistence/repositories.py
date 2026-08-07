@@ -65,7 +65,7 @@ class AnalysisRepository:
     ) -> UUID:
         self._validate_run(findings, assessment, policy_version, source_fetched_at)
 
-        completed_at = self._completed_at()
+        started_at = self._clock_now()
         snapshot_persisted = False
         try:
             async with self._sessions() as session:
@@ -73,13 +73,14 @@ class AnalysisRepository:
                     release = await self._release_for_snapshot(
                         session, snapshot, policy_version
                     )
+                    completed_at = self._clock_now()
                     run = AnalysisRunRow(
                         release_id=release.id,
                         policy_version=policy_version,
                         source_fetched_at=source_fetched_at,
                         state="COMPLETED",
                         assessment_status=assessment.status.value,
-                        started_at=completed_at,
+                        started_at=started_at,
                         completed_at=completed_at,
                     )
                     session.add(run)
@@ -213,9 +214,10 @@ class AnalysisRepository:
         policy_version: str,
         source_fetched_at: datetime,
     ) -> None:
-        completed_at = self._completed_at()
+        started_at = self._clock_now()
         async with self._sessions() as session, session.begin():
             release = await self._release_for_snapshot(session, snapshot, policy_version)
+            completed_at = self._clock_now()
             session.add(
                 AnalysisRunRow(
                     release_id=release.id,
@@ -223,7 +225,7 @@ class AnalysisRepository:
                     source_fetched_at=source_fetched_at,
                     state="FAILED",
                     assessment_status=None,
-                    started_at=completed_at,
+                    started_at=started_at,
                     completed_at=completed_at,
                 )
             )
@@ -244,11 +246,11 @@ class AnalysisRepository:
         if any(not finding.evidence for finding in findings):
             raise ValueError("each readiness finding requires evidence")
 
-    def _completed_at(self) -> datetime:
-        completed_at = self._clock()
-        if completed_at.tzinfo is None:
+    def _clock_now(self) -> datetime:
+        timestamp = self._clock()
+        if timestamp.tzinfo is None:
             raise ValueError("clock must return a timezone-aware datetime")
-        return completed_at.astimezone(UTC)
+        return timestamp.astimezone(UTC)
 
     @staticmethod
     def _assessment_status(run: AnalysisRunRow) -> str:

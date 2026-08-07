@@ -244,12 +244,38 @@ async def test_get_run_retrieves_all_persisted_analysis_audit_fields(
     assert stored.source_fetched_at == datetime(2026, 8, 7, 14, 30, tzinfo=UTC)
 
 
+async def test_create_run_records_distinct_clocked_start_and_completion_times(
+    database_url: str,
+    fixture_run: CreateRunArguments,
+    postgres: asyncpg.Connection,
+) -> None:
+    """Terminal rows record completion after identity creation, not source fetch time."""
+    started_at = datetime(2026, 8, 7, 15, 0, tzinfo=UTC)
+    completed_at = datetime(2026, 8, 7, 15, 1, tzinfo=UTC)
+    clock_values = iter((started_at, completed_at))
+    clocked_repository = AnalysisRepository(database_url, clock=lambda: next(clock_values))
+    try:
+        await clocked_repository.create_run(**fixture_run)
+    finally:
+        await clocked_repository.close()
+
+    persisted = await postgres.fetchrow(
+        "SELECT started_at, completed_at, source_fetched_at FROM analysis_runs"
+    )
+    assert persisted is not None
+    assert persisted["started_at"] == started_at
+    assert persisted["completed_at"] == completed_at
+    assert persisted["completed_at"] > persisted["started_at"]
+    assert persisted["completed_at"] != persisted["source_fetched_at"]
+
+
 async def test_concurrent_creates_share_one_release_identity(
     database_url: str,
     fixture_run: CreateRunArguments,
     postgres: asyncpg.Connection,
 ) -> None:
     """Concurrent analysis runs must not duplicate repository, policy, or release rows."""
+    await postgres.execute("TRUNCATE TABLE repository_connections CASCADE")
     repositories = [AnalysisRepository(database_url), AnalysisRepository(database_url)]
     try:
         run_ids = await asyncio.gather(
