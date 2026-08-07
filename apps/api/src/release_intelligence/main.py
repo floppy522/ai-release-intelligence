@@ -11,7 +11,6 @@ from starlette.responses import Response
 
 from release_intelligence.adapters.github.auth import (
     GitHubAppTokenProvider,
-    GitHubHttpClient,
     GitHubOAuthGateway,
 )
 from release_intelligence.adapters.persistence.auth import AuthRepository
@@ -26,6 +25,7 @@ from release_intelligence.application.analyze_release import assess_fixture_rele
 from release_intelligence.config import AppSettings
 from release_intelligence.domain.models import ReadinessAssessment
 from release_intelligence.ports.auth import AuthPersistenceError
+from release_intelligence.ports.github import GitHubHttpClient
 from release_intelligence.security.crypto import (
     CredentialCipher,
     digest_matches,

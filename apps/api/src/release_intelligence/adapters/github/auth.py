@@ -5,7 +5,6 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
 from urllib.parse import urlencode
 
 import httpx
@@ -13,17 +12,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from pydantic import SecretStr
 
-
-class GitHubResponse(Protocol):
-    def raise_for_status(self) -> None: ...
-
-    def json(self) -> Mapping[str, object]: ...
-
-
-class GitHubHttpClient(Protocol):
-    async def post(self, path: str, **kwargs: object) -> GitHubResponse: ...
-
-    async def get(self, path: str, **kwargs: object) -> GitHubResponse: ...
+from release_intelligence.ports.github import GitHubHttpClient
 
 
 class GitHubAuthorizationError(Exception):
