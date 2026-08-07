@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
+from pydantic import TypeAdapter
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
@@ -159,21 +160,22 @@ class AnalysisRepository:
         snapshot: ReleaseSnapshot,
         policy_version: str,
     ) -> ReleaseRow:
+        provider = "fixture" if snapshot.repository_id == "fixture" else "github"
         await session.execute(
             insert(RepositoryConnectionRow)
             .values(
-                provider="fixture",
-                external_repository_id="example/release-intelligence",
-                full_name="example/release-intelligence",
+                provider=provider,
+                external_repository_id=snapshot.repository_id,
+                full_name=snapshot.repository_full_name,
             )
             .on_conflict_do_nothing(constraint="uq_repository_identity")
         )
         repository = await session.scalar(
             select(RepositoryConnectionRow)
             .where(
-                RepositoryConnectionRow.provider == "fixture",
+                RepositoryConnectionRow.provider == provider,
                 RepositoryConnectionRow.external_repository_id
-                == "example/release-intelligence",
+                == snapshot.repository_id,
             )
             .order_by(RepositoryConnectionRow.id)
         )
@@ -260,32 +262,14 @@ class AnalysisRepository:
 
     @staticmethod
     def _snapshot_payload(snapshot: ReleaseSnapshot) -> dict[str, object]:
-        return {
-            "release_name": snapshot.release_name,
-            "issue_number": snapshot.issue_number,
-            "milestone_number": snapshot.milestone_number,
-            "issue_labels": list(snapshot.issue_labels),
-            "linked_pr_numbers": list(snapshot.linked_pr_numbers),
-            "issue_evidence": {
-                "evidence_id": snapshot.issue_evidence.evidence_id,
-                "source_type": snapshot.issue_evidence.source_type,
-                "source_id": snapshot.issue_evidence.source_id,
-                "url": snapshot.issue_evidence.url,
-                "fingerprint": snapshot.issue_evidence.fingerprint,
-            },
-        }
+        return cast(
+            dict[str, object],
+            TypeAdapter(ReleaseSnapshot).dump_python(snapshot, mode="json"),
+        )
 
     @staticmethod
     def _snapshot_from_payload(payload: dict[str, object]) -> ReleaseSnapshot:
-        evidence_payload = cast(dict[str, str], payload["issue_evidence"])
-        return ReleaseSnapshot(
-            release_name=cast(str, payload["release_name"]),
-            issue_number=cast(str, payload["issue_number"]),
-            milestone_number=cast(int, payload["milestone_number"]),
-            issue_labels=tuple(cast(list[str], payload["issue_labels"])),
-            linked_pr_numbers=tuple(cast(list[str], payload["linked_pr_numbers"])),
-            issue_evidence=EvidenceRef(**evidence_payload),
-        )
+        return TypeAdapter(ReleaseSnapshot).validate_python(payload)
 
     @staticmethod
     def _finding_from_row(row: ReadinessFindingRow) -> ReadinessFinding:

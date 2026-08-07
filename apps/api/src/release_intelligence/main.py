@@ -13,15 +13,24 @@ from release_intelligence.adapters.github.auth import (
     GitHubAppTokenProvider,
     GitHubOAuthGateway,
 )
+from release_intelligence.adapters.github.client import GitHubRestClient
 from release_intelligence.adapters.persistence.auth import AuthRepository
+from release_intelligence.adapters.persistence.repositories import AnalysisRepository
 from release_intelligence.api.dependencies import (
     AuthStore,
     OAuthGateway,
     SessionContext,
 )
 from release_intelligence.api.routes.auth import router as auth_router
+from release_intelligence.api.routes.releases import router as releases_router
 from release_intelligence.api.schemas import AssessmentResponse
-from release_intelligence.application.analyze_release import assess_fixture_release
+from release_intelligence.application.analyze_release import (
+    AnalysisRequest,
+    AnalysisService,
+    GitHubReleaseLoader,
+    ReleaseLoader,
+    assess_fixture_release,
+)
 from release_intelligence.config import AppSettings
 from release_intelligence.domain.models import ReadinessAssessment
 from release_intelligence.ports.auth import AuthPersistenceError
@@ -76,6 +85,7 @@ def create_app(
     session_ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS,
     oauth_state_ttl_seconds: int = DEFAULT_OAUTH_STATE_TTL_SECONDS,
     configure_auth: bool = True,
+    analysis_service: AnalysisService | None = None,
 ) -> FastAPI:
     effective_clock = clock or (lambda: datetime.now(UTC))
 
@@ -86,7 +96,9 @@ def create_app(
         credential_cipher = cipher
         owned_store: ManagedAuthStore | None = None
         owned_client: ManagedGitHubHttpClient | None = None
+        owned_analysis_repository: AnalysisRepository | None = None
         configuration = settings
+        configured_analysis_service = analysis_service
         try:
             install_access_log_redaction()
             if configure_auth and (
@@ -117,23 +129,52 @@ def create_app(
                     credential_cipher = CredentialCipher(
                         configuration.credential_encryption_key
                     )
-                application.state.github_app_token_provider = GitHubAppTokenProvider(
+                token_provider = GitHubAppTokenProvider(
                     app_id=configuration.github_app_id,
                     private_key=configuration.github_private_key_pem,
                     client=owned_client,
                     clock=effective_clock,
                 )
+                application.state.github_app_token_provider = token_provider
+                if configured_analysis_service is None:
+                    owned_analysis_repository = AnalysisRepository(
+                        configuration.database_url.get_secret_value(),
+                        clock=effective_clock,
+                    )
+
+                    async def loader_factory(
+                        analysis_request: AnalysisRequest,
+                    ) -> ReleaseLoader:
+                        token = await token_provider.installation_token(
+                            analysis_request.installation_id
+                        )
+                        source = GitHubRestClient(
+                            token=token,
+                            client=cast(httpx.AsyncClient, owned_client),
+                        )
+                        return GitHubReleaseLoader(source, clock=effective_clock)
+
+                    configured_analysis_service = AnalysisService(
+                        loader_factory=loader_factory,
+                        repository=owned_analysis_repository,
+                        clock=effective_clock,
+                    )
             application.state.auth_store = store
             application.state.oauth_gateway = gateway
             application.state.credential_cipher = credential_cipher
+            application.state.analysis_service = configured_analysis_service
             yield
         finally:
             try:
-                if owned_client is not None:
-                    await owned_client.aclose()
+                if owned_analysis_repository is not None:
+                    await owned_analysis_repository.close()
             finally:
-                if owned_store is not None:
-                    await owned_store.close()
+                try:
+                    if owned_client is not None:
+                        await owned_client.aclose()
+                finally:
+                    if owned_store is not None:
+                        await owned_store.close()
 
     application = FastAPI(title="AI Release Intelligence", lifespan=lifespan)
     application.state.auth_store = auth_store
@@ -143,7 +184,9 @@ def create_app(
     application.state.clock = effective_clock
     application.state.session_ttl_seconds = session_ttl_seconds
     application.state.oauth_state_ttl_seconds = oauth_state_ttl_seconds
+    application.state.analysis_service = analysis_service
     application.include_router(auth_router)
+    application.include_router(releases_router)
 
     @application.middleware("http")
     async def enforce_csrf(

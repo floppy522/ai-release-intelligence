@@ -12,8 +12,9 @@ class GitHubError(Exception):
 
 
 class GitHubRateLimited(GitHubError):
-    def __init__(self) -> None:
+    def __init__(self, reset_at: datetime | None = None) -> None:
         super().__init__("GitHub request was rate limited")
+        self.reset_at = reset_at
 
 
 class GitHubUnauthorized(GitHubError):
@@ -167,6 +168,8 @@ class GitHubSource(Protocol):
     async def get_pull_request(
         self, repo: RepoRef, pull_number: int
     ) -> GitHubPullRequest: ...
+
+    async def resolve_ref(self, repo: RepoRef, ref: str) -> str: ...
 
     async def list_checks_for_ref(
         self, repo: RepoRef, ref: str

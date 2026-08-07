@@ -22,6 +22,7 @@ from pydantic import SecretStr
 from release_intelligence.adapters.github.mapper import (
     GitHubPayloadError,
     map_check,
+    map_commit_sha,
     map_comparison,
     map_item,
     map_milestone,
@@ -130,6 +131,12 @@ class GitHubRestClient:
             f"{self._repo_path(repo)}/pulls/{pull_number}"
         )
         return self._map_one(payload, map_pull_request)
+
+    async def resolve_ref(self, repo: RepoRef, ref: str) -> str:
+        payload = await self._get_json(
+            f"{self._repo_path(repo)}/commits/{quote(ref, safe='')}"
+        )
+        return self._map_one(payload, map_commit_sha)
 
     async def list_checks_for_ref(
         self, repo: RepoRef, ref: str
@@ -320,12 +327,12 @@ class GitHubRestClient:
     def _raise_for_status(self, response: httpx.Response) -> None:
         status_code = response.status_code
         if status_code == 429:
-            raise GitHubRateLimited()
+            raise GitHubRateLimited(self.rate_limit.reset_at)
         if status_code == 403:
             if self.rate_limit.remaining == 0 or self._valid_retry_after(
                 response.headers.get("Retry-After")
             ) or self._has_secondary_rate_limit_message(response):
-                raise GitHubRateLimited()
+                raise GitHubRateLimited(self.rate_limit.reset_at)
             raise GitHubUnauthorized()
         if status_code == 401:
             raise GitHubUnauthorized()

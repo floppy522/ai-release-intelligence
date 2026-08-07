@@ -215,6 +215,33 @@ async def test_check_fixture_maps_runs_without_logs() -> None:
     assert not hasattr(checks[0], "logs")
 
 
+async def test_resolve_ref_returns_only_the_candidate_commit_sha() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _response(
+            request,
+            200,
+            {
+                "sha": "4" * 40,
+                "html_url": "https://github.com/octo-fixtures/release-demo/commit/"
+                + "4" * 40,
+                "commit": {"message": "must not be normalized"},
+                "files": [{"filename": "must-not-leak.py"}],
+            },
+        )
+
+    client, http = _client(handler)
+    try:
+        sha = await client.resolve_ref(REPO, "release/2026-08-10")
+    finally:
+        await http.aclose()
+
+    assert sha == "4" * 40
+    assert requests[0].url.raw_path.endswith(b"/commits/release%2F2026-08-10")
+
+
 async def test_checks_reject_missing_page_when_total_count_is_larger() -> None:
     payload = _fixture("check_runs.json")
     assert isinstance(payload, dict)
@@ -581,6 +608,7 @@ async def test_rate_limit_takes_precedence_and_stops_immediately(status: int) ->
 
     assert len(requests) == 1
     assert client.rate_limit.remaining == 0
+    assert raised.value.reset_at == datetime.fromtimestamp(1786125600, UTC)
     assert TOKEN.get_secret_value() not in str(raised.value)
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None

@@ -243,6 +243,16 @@ def map_commit(payload: object) -> GitHubCommit:
     )
 
 
+def map_commit_sha(payload: object) -> str:
+    item = _mapping(payload)
+    sha = _required_string(item.get("sha"))
+    if len(sha) != 40 or any(
+        character not in "0123456789abcdefABCDEF" for character in sha
+    ):
+        return _invalid()
+    return sha.lower()
+
+
 def _required_string(value: object) -> str:
     result = _string(value)
     assert result is not None

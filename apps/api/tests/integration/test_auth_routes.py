@@ -435,6 +435,7 @@ async def test_settings_lifespan_wires_auth_and_closes_shared_resources(
 
         assert response.status_code == 307
         assert app.state.github_app_token_provider is not None
+        assert app.state.analysis_service is not None
         assert app.state.session_ttl_seconds == 3600
         assert "Max-Age=120" in response.headers["set-cookie"]
         stored_expiry = next(iter(store.oauth_states.values()))[1]

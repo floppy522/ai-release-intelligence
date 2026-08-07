@@ -116,6 +116,11 @@ def fixture_run() -> CreateRunArguments:
         issue_labels=("code-change", "release-blocker"),
         linked_pr_numbers=(),
         issue_evidence=evidence,
+        fetch_started_at=datetime(2026, 8, 7, 14, 29, tzinfo=UTC),
+        fetched_at=datetime(2026, 8, 7, 14, 30, tzinfo=UTC),
+        complete=True,
+        candidate_ref="release/2026-08-10",
+        candidate_sha="4" * 40,
     )
     finding = ReadinessFinding(
         rule_id="scope.code_change_requires_pr",
@@ -238,6 +243,11 @@ async def test_get_run_retrieves_all_persisted_analysis_audit_fields(
     assert stored.id == run_id
     assert stored.snapshot == fixture_run["snapshot"]
     assert stored.snapshot.milestone_number == 7
+    assert stored.snapshot.fetch_started_at == datetime(
+        2026, 8, 7, 14, 29, tzinfo=UTC
+    )
+    assert stored.snapshot.candidate_ref == "release/2026-08-10"
+    assert stored.snapshot.candidate_sha == "4" * 40
     assert stored.findings == fixture_run["findings"]
     assert stored.assessment == fixture_run["assessment"]
     assert stored.policy_version == "2026.08.1"
