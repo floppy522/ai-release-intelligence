@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
@@ -36,6 +36,7 @@ from release_intelligence.domain.models import (
 )
 from release_intelligence.ports.repositories import (
     ImmutableSnapshotError,
+    IncompatibleSnapshotError,
     StoredAnalysisRun,
 )
 
@@ -133,6 +134,9 @@ class AnalysisRepository:
             .where(AnalysisRunRow.id == run_id)
             .options(
                 selectinload(AnalysisRunRow.snapshot),
+                selectinload(AnalysisRunRow.release).selectinload(
+                    ReleaseRow.repository
+                ),
                 selectinload(AnalysisRunRow.findings).selectinload(
                     ReadinessFindingRow.evidence
                 ),
@@ -144,9 +148,13 @@ class AnalysisRepository:
             raise KeyError(f"Unknown analysis run: {run_id}")
 
         findings = tuple(self._finding_from_row(finding) for finding in run.findings)
+        snapshot = self._decode_snapshot(
+            run.snapshot.payload,
+            repository_id=run.release.repository.external_repository_id,
+        )
         return StoredAnalysisRun(
             id=run.id,
-            snapshot=self._snapshot_from_payload(run.snapshot.payload),
+            snapshot=snapshot,
             findings=findings,
             assessment=ReadinessAssessment(
                 status=ReleaseStatus(self._assessment_status(run)), findings=findings
@@ -275,6 +283,15 @@ class AnalysisRepository:
     @staticmethod
     def _snapshot_from_payload(payload: dict[str, object]) -> ReleaseSnapshot:
         return TypeAdapter(ReleaseSnapshot).validate_python(payload)
+
+    @classmethod
+    def _decode_snapshot(
+        cls, payload: dict[str, object], *, repository_id: str
+    ) -> ReleaseSnapshot:
+        try:
+            return cls._snapshot_from_payload(payload)
+        except ValidationError:
+            raise IncompatibleSnapshotError(repository_id) from None
 
     @staticmethod
     def _finding_from_row(row: ReadinessFindingRow) -> ReadinessFinding:

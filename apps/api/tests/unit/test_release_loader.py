@@ -31,6 +31,7 @@ from release_intelligence.ports.github import (
     GitHubRateLimited,
     RepoRef,
 )
+from release_intelligence.ports.repositories import IncompatibleSnapshotError
 
 NOW = datetime(2026, 8, 7, 14, 30, tzinfo=UTC)
 REQUEST = AnalysisRequest(
@@ -349,6 +350,22 @@ async def test_reordered_identical_set_like_evidence_is_one_stable_window() -> N
     assert source.calls["checks"] == 2
 
 
+async def test_reversed_semantic_duplicate_links_choose_same_representative() -> None:
+    source = FakeSource()
+    later = replace(
+        timeline_event(), source_id="999", created_at=NOW - timedelta(days=1)
+    )
+    duplicates = (timeline_event(), later)
+    source.timelines = [duplicates, tuple(reversed(duplicates))] * 2
+
+    loaded = await GitHubReleaseLoader(source, clock=lambda: NOW).load(REQUEST)
+
+    assert loaded.complete is True
+    assert len(loaded.links) == 1
+    assert loaded.links[0].source_id == "900"
+    assert source.calls["timeline"] == 2
+
+
 async def test_loader_fails_closed_before_expanding_oversized_milestone() -> None:
     source = FakeSource()
     source.item_sets[0] = tuple(issue() for _ in range(101))
@@ -452,6 +469,17 @@ def test_unknown_future_snapshot_version_is_rejected_at_deserialization() -> Non
 
     with pytest.raises(ValidationError):
         AnalysisRepository._snapshot_from_payload(payload)
+
+
+def test_repository_wraps_unknown_snapshot_version_with_trusted_identity() -> None:
+    payload = AnalysisRepository._snapshot_payload(load_demo_release())
+    payload["snapshot_version"] = "github-v2"
+
+    with pytest.raises(IncompatibleSnapshotError) as raised:
+        AnalysisRepository._decode_snapshot(payload, repository_id="trusted-repo-id")
+
+    assert raised.value.repository_id == "trusted-repo-id"
+    assert "github-v2" not in str(raised.value)
 
 
 @pytest.mark.parametrize(

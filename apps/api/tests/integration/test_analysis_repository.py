@@ -25,6 +25,7 @@ from sqlalchemy.exc import DBAPIError
 from release_intelligence.adapters.persistence.repositories import (
     AnalysisRepository,
     ImmutableSnapshotError,
+    IncompatibleSnapshotError,
 )
 from release_intelligence.domain.models import (
     EvidenceRef,
@@ -287,6 +288,35 @@ async def test_get_run_retrieves_all_persisted_analysis_audit_fields(
     assert stored.assessment == fixture_run["assessment"]
     assert stored.policy_version == "2026.08.1"
     assert stored.source_fetched_at == datetime(2026, 8, 7, 14, 30, tzinfo=UTC)
+
+
+async def test_incompatible_payload_reports_relational_repository_identity(
+    repository: AnalysisRepository,
+    fixture_run: CreateRunArguments,
+    postgres: asyncpg.Connection,
+) -> None:
+    run_id = await repository.create_run(**fixture_run)
+    await postgres.execute(
+        "ALTER TABLE release_snapshots DISABLE TRIGGER "
+        "release_snapshots_immutable_update"
+    )
+    try:
+        await postgres.execute(
+            "UPDATE release_snapshots "
+            "SET payload = jsonb_set(payload, '{snapshot_version}', '\"github-v2\"') "
+            "WHERE analysis_run_id = $1",
+            run_id,
+        )
+    finally:
+        await postgres.execute(
+            "ALTER TABLE release_snapshots ENABLE TRIGGER "
+            "release_snapshots_immutable_update"
+        )
+
+    with pytest.raises(IncompatibleSnapshotError) as raised:
+        await repository.get_run(run_id)
+
+    assert raised.value.repository_id == "fixture"
 
 
 async def test_create_run_records_distinct_clocked_start_and_completion_times(

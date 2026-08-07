@@ -31,7 +31,10 @@ from release_intelligence.ports.github import (
     GitHubRateLimited,
     GitHubUnauthorized,
 )
-from release_intelligence.ports.repositories import StoredAnalysisRun
+from release_intelligence.ports.repositories import (
+    IncompatibleSnapshotError,
+    StoredAnalysisRun,
+)
 from release_intelligence.security.crypto import token_digest
 
 NOW = datetime(2026, 8, 7, 14, 30, tzinfo=UTC)
@@ -116,6 +119,7 @@ class MemoryAnalysisRepository:
         self.runs: dict[UUID, StoredAnalysisRun] = {}
         self.failure = failure
         self.write_failed = False
+        self.incompatible_runs: dict[UUID, str] = {}
 
     async def create_run(self, **values: Any) -> UUID:
         if self.failure:
@@ -133,6 +137,8 @@ class MemoryAnalysisRepository:
         return run_id
 
     async def get_run(self, run_id: UUID) -> StoredAnalysisRun:
+        if run_id in self.incompatible_runs:
+            raise IncompatibleSnapshotError(self.incompatible_runs[run_id])
         try:
             return self.runs[run_id]
         except KeyError:
@@ -445,3 +451,26 @@ async def test_missing_and_unauthorized_run_ids_are_indistinguishable(
 
     assert missing.status_code == unauthorized.status_code == 404
     assert missing.json() == unauthorized.json()
+
+
+async def test_incompatible_snapshot_authorizes_from_relational_identity_before_409(
+    store: FakeAuthStore,
+) -> None:
+    repository = MemoryAnalysisRepository()
+    run_id = uuid4()
+    repository.incompatible_runs[run_id] = REPOSITORY_ID
+    analysis_service = service(FakeLoader(snapshot()), repository)
+
+    async with await request_client(analysis_service, store) as client:
+        authorized = await client.get(f"/api/analyses/{run_id}")
+        store.allow_repository = False
+        unauthorized = await client.get(f"/api/analyses/{run_id}")
+        missing = await client.get(f"/api/analyses/{uuid4()}")
+
+    assert authorized.status_code == 409
+    assert authorized.json() == {
+        "detail": "Analysis snapshot version is unsupported; refresh or upgrade",
+        "status": "INSUFFICIENT_DATA",
+    }
+    assert unauthorized.status_code == missing.status_code == 404
+    assert unauthorized.json() == missing.json()

@@ -211,8 +211,7 @@ class GitHubReleaseLoader:
             raise GitHubPartialData()
         candidate_sha = await self._resolve_candidate(request)
 
-        links: list[ReleaseLink] = []
-        seen_links: set[tuple[int, int, str]] = set()
+        links_by_key: dict[tuple[int, int, str], ReleaseLink] = {}
         event_count = 0
         pull_numbers = {
             item.number
@@ -234,18 +233,19 @@ class GitHubReleaseLoader:
                     event.pull_request_number,
                     event.pull_request_url,
                 )
-                if link_key in seen_links:
-                    continue
-                seen_links.add(link_key)
-                links.append(
-                    ReleaseLink(
-                        source_id=event.source_id,
-                        issue_number=item.number,
-                        pull_request_number=event.pull_request_number,
-                        url=event.pull_request_url,
-                        created_at=event.created_at,
-                    )
+                candidate = ReleaseLink(
+                    source_id=event.source_id,
+                    issue_number=item.number,
+                    pull_request_number=event.pull_request_number,
+                    url=event.pull_request_url,
+                    created_at=event.created_at,
                 )
+                current = links_by_key.get(link_key)
+                if current is None or (candidate.source_id, candidate.created_at) < (
+                    current.source_id,
+                    current.created_at,
+                ):
+                    links_by_key[link_key] = candidate
                 pull_numbers.add(event.pull_request_number)
                 if len(pull_numbers) > MAX_RELATED_PULL_REQUESTS:
                     raise GitHubPartialData()
@@ -292,7 +292,7 @@ class GitHubReleaseLoader:
             candidate_sha=candidate_sha,
             links=tuple(
                 sorted(
-                    links,
+                    links_by_key.values(),
                     key=lambda link: (
                         link.issue_number,
                         link.pull_request_number,

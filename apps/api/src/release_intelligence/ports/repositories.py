@@ -16,6 +16,14 @@ class ImmutableSnapshotError(RuntimeError):
     """Raised when code attempts to revise a historical source snapshot."""
 
 
+class IncompatibleSnapshotError(RuntimeError):
+    """A stored snapshot cannot be decoded by this application version."""
+
+    def __init__(self, repository_id: str) -> None:
+        super().__init__("Stored analysis snapshot version is unsupported")
+        self.repository_id = repository_id
+
+
 @dataclass(frozen=True)
 class StoredAnalysisRun:
     id: UUID

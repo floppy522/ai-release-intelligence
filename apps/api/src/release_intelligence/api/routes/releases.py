@@ -6,6 +6,7 @@ from typing import Annotated, Self, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -25,6 +26,7 @@ from release_intelligence.application.analyze_release import (
 )
 from release_intelligence.domain.models import ReleaseSnapshot, ReleaseStatus
 from release_intelligence.ports.github import GitHubUnauthorized, RepoRef
+from release_intelligence.ports.repositories import IncompatibleSnapshotError
 
 router = APIRouter(prefix="/api/analyses", tags=["analyses"])
 
@@ -121,9 +123,18 @@ async def get_analysis(
     store: Annotated[AuthStore, Depends(get_auth_store)],
     service: Annotated[AnalysisService, Depends(get_analysis_service)],
     clock: Annotated[Callable[[], datetime], Depends(get_clock)],
-) -> AnalysisRunResponse:
+) -> AnalysisRunResponse | JSONResponse:
     try:
         run = await service.get(run_id)
+    except IncompatibleSnapshotError as error:
+        await _require_run_access(user.id, error.repository_id, store)
+        return JSONResponse(
+            {
+                "detail": "Analysis snapshot version is unsupported; refresh or upgrade",
+                "status": ReleaseStatus.INSUFFICIENT_DATA.value,
+            },
+            status_code=status.HTTP_409_CONFLICT,
+        )
     except KeyError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Analysis was not found") from None
     except SQLAlchemyError:
@@ -131,16 +142,7 @@ async def get_analysis(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Analysis persistence unavailable",
         ) from None
-    try:
-        await require_repository_access(
-            user_id=user.id, repository_id=run.snapshot.repository_id, store=store
-        )
-    except HTTPException as error:
-        if error.status_code == status.HTTP_403_FORBIDDEN:
-            raise HTTPException(
-                status.HTTP_404_NOT_FOUND, "Analysis was not found"
-            ) from None
-        raise
+    await _require_run_access(user.id, run.snapshot.repository_id, store)
     freshness = assess(run.snapshot, policy=None, decisions=(), now=clock())
     effective_status = (
         ReleaseStatus.INSUFFICIENT_DATA
@@ -152,3 +154,18 @@ async def get_analysis(
         status=effective_status,
         snapshot=run.snapshot,
     )
+
+
+async def _require_run_access(
+    user_id: str, repository_id: str, store: AuthStore
+) -> None:
+    try:
+        await require_repository_access(
+            user_id=user_id, repository_id=repository_id, store=store
+        )
+    except HTTPException as error:
+        if error.status_code == status.HTTP_403_FORBIDDEN:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "Analysis was not found"
+            ) from None
+        raise
