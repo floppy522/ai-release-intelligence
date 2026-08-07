@@ -4,6 +4,7 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
     DateTime,
     ForeignKey,
     Integer,
@@ -21,14 +22,115 @@ class Base(DeclarativeBase):
     pass
 
 
-class RepositoryConnectionRow(Base):
-    __tablename__ = "repository_connections"
+class UserRow(Base):
+    __tablename__ = "users"
     __table_args__ = (
-        UniqueConstraint("provider", "external_repository_id", name="uq_repository_identity"),
+        UniqueConstraint("provider", "external_user_id", name="uq_user_identity"),
     )
 
     id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    login: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    credential: Mapped[EncryptedUserCredentialRow | None] = relationship(
+        back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
+    installation_access: Mapped[list[UserInstallationAccessRow]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    web_sessions: Mapped[list[WebSessionRow]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class EncryptedUserCredentialRow(Base):
+    __tablename__ = "encrypted_user_credentials"
+
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    encrypted_token: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user: Mapped[UserRow] = relationship(back_populates="credential")
+
+
+class GitHubInstallationRow(Base):
+    __tablename__ = "github_installations"
+
+    id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    external_installation_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, unique=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user_access: Mapped[list[UserInstallationAccessRow]] = relationship(
+        back_populates="installation", cascade="all, delete-orphan"
+    )
+    repositories: Mapped[list[RepositoryConnectionRow]] = relationship(
+        back_populates="installation"
+    )
+
+
+class UserInstallationAccessRow(Base):
+    __tablename__ = "user_installation_access"
+
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    installation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("github_installations.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user: Mapped[UserRow] = relationship(back_populates="installation_access")
+    installation: Mapped[GitHubInstallationRow] = relationship(
+        back_populates="user_access"
+    )
+
+
+class OAuthStateRow(Base):
+    __tablename__ = "oauth_states"
+
+    id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class RepositoryConnectionRow(Base):
+    __tablename__ = "repository_connections"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "external_repository_id", name="uq_repository_identity"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    installation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("github_installations.id", ondelete="CASCADE"), nullable=True
     )
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     external_repository_id: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -43,7 +145,9 @@ class RepositoryConnectionRow(Base):
     releases: Mapped[list[ReleaseRow]] = relationship(
         back_populates="repository", cascade="all, delete-orphan"
     )
-    web_sessions: Mapped[list[WebSessionRow]] = relationship(back_populates="repository")
+    installation: Mapped[GitHubInstallationRow | None] = relationship(
+        back_populates="repositories"
+    )
 
 
 class ReleasePolicyRow(Base):
@@ -63,7 +167,9 @@ class ReleasePolicyRow(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    repository: Mapped[RepositoryConnectionRow] = relationship(back_populates="policies")
+    repository: Mapped[RepositoryConnectionRow] = relationship(
+        back_populates="policies"
+    )
 
 
 class ReleaseRow(Base):
@@ -88,7 +194,9 @@ class ReleaseRow(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    repository: Mapped[RepositoryConnectionRow] = relationship(back_populates="releases")
+    repository: Mapped[RepositoryConnectionRow] = relationship(
+        back_populates="releases"
+    )
     analysis_runs: Mapped[list[AnalysisRunRow]] = relationship(
         back_populates="release", cascade="all, delete-orphan"
     )
@@ -104,13 +212,17 @@ class AnalysisRunRow(Base):
         ForeignKey("releases.id", ondelete="CASCADE"), nullable=False
     )
     policy_version: Mapped[str] = mapped_column(String(128), nullable=False)
-    source_fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     state: Mapped[str] = mapped_column(String(32), nullable=False)
     assessment_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
 
     release: Mapped[ReleaseRow] = relationship(back_populates="analysis_runs")
     snapshot: Mapped[ReleaseSnapshotRow] = relationship(
@@ -246,15 +358,16 @@ class WebSessionRow(Base):
     id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
     )
-    repository_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("repository_connections.id", ondelete="SET NULL"), nullable=True
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
-    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    csrf_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    repository: Mapped[RepositoryConnectionRow | None] = relationship(
-        back_populates="web_sessions"
-    )
+    user: Mapped[UserRow] = relationship(back_populates="web_sessions")
