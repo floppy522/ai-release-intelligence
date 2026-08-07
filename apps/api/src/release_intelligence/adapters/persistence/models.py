@@ -106,7 +106,7 @@ class AnalysisRunRow(Base):
     policy_version: Mapped[str] = mapped_column(String(128), nullable=False)
     source_fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     state: Mapped[str] = mapped_column(String(32), nullable=False)
-    assessment_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    assessment_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -206,6 +206,10 @@ class HumanDecisionRow(Base):
     finding_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("readiness_findings.id", ondelete="SET NULL"), nullable=True
     )
+    fingerprint: Mapped[str] = mapped_column(String(255), nullable=False)
+    supersedes_decision_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("human_decisions.id", ondelete="RESTRICT"), nullable=True
+    )
     decision: Mapped[str] = mapped_column(String(32), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -214,6 +218,9 @@ class HumanDecisionRow(Base):
     )
 
     analysis_run: Mapped[AnalysisRunRow] = relationship(back_populates="decisions")
+    supersedes: Mapped[HumanDecisionRow | None] = relationship(
+        foreign_keys=[supersedes_decision_id], remote_side="HumanDecisionRow.id"
+    )
 
 
 class AIExplanationRow(Base):

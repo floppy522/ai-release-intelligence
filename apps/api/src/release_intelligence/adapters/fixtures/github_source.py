@@ -12,6 +12,7 @@ def load_demo_release() -> ReleaseSnapshot:
     return ReleaseSnapshot(
         release_name="Release 2026.08.10",
         issue_number="142",
+        milestone_number=7,
         issue_labels=("code-change",),
         linked_pr_numbers=(),
         issue_evidence=issue_evidence,

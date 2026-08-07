@@ -7,6 +7,7 @@ coverage would not exercise the persistence guarantees this suite protects.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from uuid import UUID
 
 import asyncpg
 import pytest
+from sqlalchemy.exc import DBAPIError
 
 from release_intelligence.adapters.persistence.repositories import (
     AnalysisRepository,
@@ -110,6 +112,7 @@ def fixture_run() -> CreateRunArguments:
     snapshot = ReleaseSnapshot(
         release_name="2026.08",
         issue_number="142",
+        milestone_number=7,
         issue_labels=("code-change", "release-blocker"),
         linked_pr_numbers=(),
         issue_evidence=evidence,
@@ -145,33 +148,54 @@ async def test_create_run_persists_complete_analysis_atomically(
     assert await postgres.fetchval("SELECT count(*) FROM analysis_runs") == 1
     assert await postgres.fetchval("SELECT count(*) FROM release_snapshots") == 1
     assert await postgres.fetchval("SELECT count(*) FROM readiness_findings") == 1
+    assert (
+        await postgres.fetchval("SELECT github_milestone_number FROM releases") == 7
+    )
+    completion = await postgres.fetchrow(
+        "SELECT started_at, completed_at, source_fetched_at FROM analysis_runs"
+    )
+    assert completion is not None
+    assert completion["completed_at"] >= completion["started_at"]
+    assert completion["completed_at"] != completion["source_fetched_at"]
 
 
-async def test_create_run_rolls_back_every_row_when_a_finding_is_invalid(
+async def test_create_run_records_failed_audit_after_snapshot_insert_is_rejected(
     repository: AnalysisRepository,
     fixture_run: CreateRunArguments,
     postgres: asyncpg.Connection,
 ) -> None:
-    """Dropping a finding's evidence must leave no partial analysis report."""
-    finding = fixture_run["findings"][0]
-    invalid_finding = replace(finding, evidence=())
-    invalid_assessment = ReadinessAssessment(
-        status=ReleaseStatus.NOT_READY,
-        findings=(invalid_finding,),
+    """A before-insert database failure retains only one immutable failed audit row."""
+    await postgres.execute(
+        """
+        CREATE FUNCTION reject_test_snapshot_insert() RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'test snapshot insert failure';
+        END;
+        $$ LANGUAGE plpgsql;
+        CREATE TRIGGER reject_test_snapshot_insert
+        BEFORE INSERT ON release_snapshots
+        FOR EACH ROW EXECUTE FUNCTION reject_test_snapshot_insert();
+        """
     )
-    invalid_run: CreateRunArguments = {
-        **fixture_run,
-        "findings": (invalid_finding,),
-        "assessment": invalid_assessment,
-    }
+    try:
+        with pytest.raises(DBAPIError, match="test snapshot insert failure"):
+            await repository.create_run(**fixture_run)
+    finally:
+        await postgres.execute(
+            "DROP TRIGGER IF EXISTS reject_test_snapshot_insert ON release_snapshots;"
+            "DROP FUNCTION IF EXISTS reject_test_snapshot_insert();"
+        )
 
-    with pytest.raises(ValueError):
-        await repository.create_run(**invalid_run)
-
-    failed_run_states = [
-        row["state"] for row in await postgres.fetch("SELECT state FROM analysis_runs")
-    ]
-    assert failed_run_states in ([], ["FAILED"])
+    failed_run = await postgres.fetchrow(
+        "SELECT state, assessment_status, policy_version, source_fetched_at "
+        "FROM analysis_runs"
+    )
+    assert failed_run is not None
+    assert failed_run["state"] == "FAILED"
+    assert failed_run["assessment_status"] is None
+    assert failed_run["policy_version"] == "2026.08.1"
+    assert failed_run["source_fetched_at"] == datetime(2026, 8, 7, 14, 30, tzinfo=UTC)
+    assert await postgres.fetchval("SELECT count(*) FROM analysis_runs") == 1
     assert await postgres.fetchval("SELECT count(*) FROM release_snapshots") == 0
     assert await postgres.fetchval("SELECT count(*) FROM readiness_findings") == 0
 
@@ -192,6 +216,14 @@ async def test_snapshot_update_is_rejected_and_original_audit_record_survives(
     stored = await repository.get_run(run_id)
     assert stored.snapshot == original_snapshot
 
+    with pytest.raises(asyncpg.PostgresError, match="immutable analysis records"):
+        await postgres.execute(
+            "UPDATE release_snapshots SET payload = '{}'::jsonb "
+            "WHERE analysis_run_id = $1",
+            run_id,
+        )
+    assert (await repository.get_run(run_id)).snapshot == original_snapshot
+
 
 async def test_get_run_retrieves_all_persisted_analysis_audit_fields(
     repository: AnalysisRepository,
@@ -205,7 +237,50 @@ async def test_get_run_retrieves_all_persisted_analysis_audit_fields(
 
     assert stored.id == run_id
     assert stored.snapshot == fixture_run["snapshot"]
+    assert stored.snapshot.milestone_number == 7
     assert stored.findings == fixture_run["findings"]
     assert stored.assessment == fixture_run["assessment"]
     assert stored.policy_version == "2026.08.1"
     assert stored.source_fetched_at == datetime(2026, 8, 7, 14, 30, tzinfo=UTC)
+
+
+async def test_concurrent_creates_share_one_release_identity(
+    database_url: str,
+    fixture_run: CreateRunArguments,
+    postgres: asyncpg.Connection,
+) -> None:
+    """Concurrent analysis runs must not duplicate repository, policy, or release rows."""
+    repositories = [AnalysisRepository(database_url), AnalysisRepository(database_url)]
+    try:
+        run_ids = await asyncio.gather(
+            *(repository.create_run(**fixture_run) for repository in repositories)
+        )
+    finally:
+        await asyncio.gather(*(repository.close() for repository in repositories))
+
+    assert len(set(run_ids)) == 2
+    assert await postgres.fetchval("SELECT count(*) FROM repository_connections") == 1
+    assert await postgres.fetchval("SELECT count(*) FROM release_policies") == 1
+    assert await postgres.fetchval("SELECT count(*) FROM releases") == 1
+
+
+async def test_human_decision_schema_preserves_fingerprint_and_lineage(
+    postgres: asyncpg.Connection,
+) -> None:
+    """Decision audit rows require fingerprints and retain append-only lineage."""
+    columns = await postgres.fetch(
+        "SELECT column_name, is_nullable FROM information_schema.columns "
+        "WHERE table_name = 'human_decisions'"
+    )
+    column_nullability = {row["column_name"]: row["is_nullable"] for row in columns}
+    assert column_nullability["fingerprint"] == "NO"
+    assert column_nullability["supersedes_decision_id"] == "YES"
+
+    constraint = await postgres.fetchrow(
+        "SELECT confdeltype FROM pg_constraint "
+        "WHERE conrelid = 'human_decisions'::regclass "
+        "AND contype = 'f' AND pg_get_constraintdef(oid) "
+        "LIKE '%supersedes_decision_id%'"
+    )
+    assert constraint is not None
+    assert constraint["confdeltype"] == "r"
