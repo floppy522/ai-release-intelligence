@@ -150,6 +150,7 @@ class CommitComparison:
     base_sha: str
     merge_base_sha: str
     commits: tuple[GitHubCommit, ...]
+    head_sha: str = ""
 
 
 class GitHubSource(Protocol):

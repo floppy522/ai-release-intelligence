@@ -285,6 +285,11 @@ class GitHubReleaseLoader:
                 key=lambda comparison: comparison.pull_request_number,
             )
         )
+        if any(
+            comparison.comparison.head_sha != candidate_sha
+            for comparison in comparisons
+        ):
+            raise GitHubPartialData()
 
         return _EvidenceWindow(
             milestone=milestone,

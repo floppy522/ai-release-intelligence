@@ -335,10 +335,32 @@ async def test_compare_fixture_maps_commit_evidence() -> None:
     assert comparison.status == "ahead"
     assert comparison.ahead_by == 2
     assert comparison.behind_by == 0
+    assert comparison.head_sha == "4" * 40
     assert [commit.sha for commit in comparison.commits] == ["3" * 40, "4" * 40]
     assert comparison.commits[0].committed_at == datetime(
         2026, 8, 6, 15, tzinfo=UTC
     )
+
+
+@pytest.mark.parametrize(
+    "head_commit",
+    [None, {}, {"sha": None}, {"sha": "not-a-complete-sha"}],
+)
+async def test_compare_rejects_missing_or_malformed_head_commit(
+    head_commit: object,
+) -> None:
+    payload = _fixture("compare_commits.json")
+    assert isinstance(payload, dict)
+    client, http = _client(
+        lambda request: _response(
+            request, 200, {**payload, "head_commit": head_commit}
+        )
+    )
+    try:
+        with pytest.raises(GitHubPartialData, match="incomplete"):
+            await client.compare_commits(REPO, "main", "release/2026-08-10")
+    finally:
+        await http.aclose()
 
 
 async def test_compare_follows_pagination_and_returns_complete_commit_set() -> None:
@@ -468,8 +490,9 @@ async def test_paths_encode_repository_segments_and_refs() -> None:
                 "behind_by": 0,
                 "total_commits": 0,
                 "html_url": "https://github.com/octo-fixtures/release-demo/compare/a...b",
-                "base_commit": {"sha": "1" * 40, "html_url": "https://github.com/x"},
-                "merge_base_commit": {
+                    "base_commit": {"sha": "1" * 40, "html_url": "https://github.com/x"},
+                    "head_commit": {"sha": "1" * 40, "html_url": "https://github.com/x"},
+                    "merge_base_commit": {
                     "sha": "1" * 40,
                     "html_url": "https://github.com/x",
                 },

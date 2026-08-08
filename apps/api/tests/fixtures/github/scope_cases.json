@@ -43,6 +43,11 @@
     {
       "name": "closed_non_blocking_issue",
       "issue_state": "closed",
+      "issue_labels": [],
+      "links": [],
+      "pulls": [],
+      "pull_items": [],
+      "comparisons": [],
       "expected_rules": []
     },
     {

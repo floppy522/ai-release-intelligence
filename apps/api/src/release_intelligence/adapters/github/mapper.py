@@ -215,6 +215,7 @@ def map_check(payload: object) -> GitHubCheck:
 def map_comparison(payload: object) -> CommitComparison:
     item = _mapping(payload)
     base_commit = _mapping(item.get("base_commit"))
+    head_commit = _mapping(item.get("head_commit"))
     merge_base_commit = _mapping(item.get("merge_base_commit"))
     commits = tuple(map_commit(commit) for commit in _list(item.get("commits")))
     total = _integer(item.get("total_commits"))
@@ -229,6 +230,7 @@ def map_comparison(payload: object) -> CommitComparison:
         base_sha=_required_string(base_commit.get("sha")),
         merge_base_sha=_required_string(merge_base_commit.get("sha")),
         commits=commits,
+        head_sha=map_commit_sha(head_commit),
     )
 
 

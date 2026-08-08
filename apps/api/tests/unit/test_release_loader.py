@@ -16,7 +16,11 @@ from release_intelligence.application.analyze_release import (
     MissingMilestone,
     assess,
 )
-from release_intelligence.domain.models import ReleaseStatus, SourceError
+from release_intelligence.domain.models import (
+    PullRequestComparison,
+    ReleaseStatus,
+    SourceError,
+)
 from release_intelligence.ports.github import (
     CommitComparison,
     GitHubCheck,
@@ -129,6 +133,7 @@ def comparison() -> CommitComparison:
         base_sha="merge-sha",
         merge_base_sha="merge-sha",
         commits=(commit,),
+        head_sha="candidate-sha",
     )
 
 
@@ -214,6 +219,7 @@ async def test_complete_loader_captures_normalized_evidence_window() -> None:
     assert snapshot.pull_requests == (pull_request(),)
     assert snapshot.checks == (check(),)
     assert snapshot.comparisons[0].pull_request_number == 143
+    assert snapshot.comparisons[0].comparison.head_sha == snapshot.candidate_sha
 
     payload = AnalysisRepository._snapshot_payload(snapshot)
     assert AnalysisRepository._snapshot_from_payload(payload) == snapshot
@@ -229,6 +235,17 @@ async def test_partial_github_fetch_cannot_produce_ready() -> None:
     assert snapshot.complete is False
     assert snapshot.source_errors[0].code == "github.partial_data"
     assert assessment.status is ReleaseStatus.INSUFFICIENT_DATA
+
+
+async def test_comparison_head_must_match_resolved_candidate() -> None:
+    source = FakeSource()
+    mismatched = replace(comparison(), head_sha="other-candidate")
+    source.comparison_sets = [mismatched] * 4
+
+    snapshot = await GitHubReleaseLoader(source, clock=lambda: NOW).load(REQUEST)
+
+    assert snapshot.complete is False
+    assert snapshot.source_errors[0].code == "github.partial_data"
 
 
 async def test_rate_limit_reset_is_preserved_as_source_metadata() -> None:
@@ -256,6 +273,9 @@ async def test_loader_reconciles_one_changed_window_then_succeeds() -> None:
     source.check_sets = [
         (replace(check(), head_sha=sha),) for sha in source.refs
     ]
+    source.comparison_sets = [
+        replace(comparison(), head_sha=sha) for sha in source.refs
+    ]
 
     snapshot = await GitHubReleaseLoader(source, clock=lambda: NOW).load(REQUEST)
 
@@ -269,6 +289,9 @@ async def test_loader_fails_closed_after_second_inconsistent_window() -> None:
     source.refs = ["a", "b", "c", "d"]
     source.check_sets = [
         (replace(check(), head_sha=sha),) for sha in source.refs
+    ]
+    source.comparison_sets = [
+        replace(comparison(), head_sha=sha) for sha in source.refs
     ]
 
     snapshot = await GitHubReleaseLoader(source, clock=lambda: NOW).load(REQUEST)
@@ -469,6 +492,30 @@ def test_unknown_future_snapshot_version_is_rejected_at_deserialization() -> Non
 
     with pytest.raises(ValidationError):
         AnalysisRepository._snapshot_from_payload(payload)
+
+
+def test_persisted_comparison_without_head_sha_uses_legacy_default() -> None:
+    release = replace(
+        load_demo_release(),
+        comparisons=(
+            PullRequestComparison(
+                pull_request_number=143,
+                comparison=comparison(),
+            ),
+        ),
+    )
+    payload = AnalysisRepository._snapshot_payload(release)
+    comparisons = payload["comparisons"]
+    assert isinstance(comparisons, list)
+    comparison_payload = comparisons[0]
+    assert isinstance(comparison_payload, dict)
+    comparison_facts = comparison_payload["comparison"]
+    assert isinstance(comparison_facts, dict)
+    comparison_facts.pop("head_sha")
+
+    restored = AnalysisRepository._snapshot_from_payload(payload)
+
+    assert restored.comparisons[0].comparison.head_sha == ""
 
 
 def test_repository_wraps_unknown_snapshot_version_with_trusted_identity() -> None:

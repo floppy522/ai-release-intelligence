@@ -3,7 +3,7 @@
   "ahead_by": 2,
   "behind_by": 0,
   "total_commits": 2,
-  "html_url": "https://github.com/octo-fixtures/release-demo/compare/main...release/2026-08-10",
+  "html_url": "https://github.com/octo-fixtures/release-demo/compare/2222222222222222222222222222222222222222...4444444444444444444444444444444444444444",
   "base_commit": {
     "sha": "2222222222222222222222222222222222222222",
     "html_url": "https://github.com/octo-fixtures/release-demo/commit/2222222222222222222222222222222222222222"
@@ -11,6 +11,10 @@
   "merge_base_commit": {
     "sha": "2222222222222222222222222222222222222222",
     "html_url": "https://github.com/octo-fixtures/release-demo/commit/2222222222222222222222222222222222222222"
+  },
+  "head_commit": {
+    "sha": "4444444444444444444444444444444444444444",
+    "html_url": "https://github.com/octo-fixtures/release-demo/commit/4444444444444444444444444444444444444444"
   },
   "commits": [
     {

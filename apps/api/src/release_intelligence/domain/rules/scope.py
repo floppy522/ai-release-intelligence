@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict
@@ -14,21 +15,30 @@ from release_intelligence.domain.models import (
     ReadinessFinding,
     ReleaseLink,
     ReleaseSnapshot,
+    SnapshotVersion,
 )
 from release_intelligence.domain.policy import ReleasePolicy
 from release_intelligence.ports.github import (
+    CommitComparison,
     GitHubItem,
     GitHubItemKind,
     GitHubPullRequest,
 )
+
+_REPOSITORY_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 def evaluate_scope(
     snapshot: ReleaseSnapshot, policy: ReleasePolicy
 ) -> tuple[ReadinessFinding, ...]:
     """Evaluate milestone membership as an ordered set of existential PR chains."""
-    issues = _issue_records(snapshot.items)
-    typed_issues = _unambiguously_typed_issues(issues, policy)
+    if not _has_valid_prerequisites(snapshot, policy):
+        return ()
+    issues = _issue_records(snapshot.items, snapshot.milestone_number)
+    typed_issues = _unambiguously_typed_issues(
+        issues, policy, snapshot.repository_full_name
+    )
     code_change_issues = tuple(
         item
         for item in typed_issues
@@ -57,7 +67,16 @@ def _evaluate_type_labels(
     for number, records in issues.items():
         item = records[0]
         type_labels = _normalized_labels(item.labels).intersection(supported)
-        if len(records) != 1 or len(type_labels) != 1:
+        if (
+            len(records) != 1
+            or len(type_labels) != 1
+            or not _is_direct_url(
+                item.url,
+                snapshot.repository_full_name,
+                "issues",
+                item.number,
+            )
+        ):
             findings.append(
                 _finding(
                     "scope.exactly_one_type",
@@ -170,10 +189,40 @@ def _evaluate_candidate_inclusion(
     return tuple(findings)
 
 
-def _issue_records(items: Iterable[GitHubItem]) -> dict[int, tuple[GitHubItem, ...]]:
+def _has_valid_prerequisites(snapshot: ReleaseSnapshot, policy: ReleasePolicy) -> bool:
+    if (
+        snapshot.snapshot_version is not SnapshotVersion.GITHUB_V1
+        or not snapshot.complete
+        or snapshot.source_errors
+        or snapshot.milestone_number != policy.milestone_number
+        or snapshot.candidate_ref != policy.candidate_branch
+        or not isinstance(snapshot.repository_id, str)
+        or not snapshot.repository_id.strip()
+        or not _is_repository_name(snapshot.repository_full_name)
+        or not _is_sha(snapshot.candidate_sha)
+    ):
+        return False
+    started_at = snapshot.fetch_started_at
+    fetched_at = snapshot.fetched_at
+    return (
+        isinstance(started_at, datetime)
+        and isinstance(fetched_at, datetime)
+        and started_at.tzinfo is not None
+        and fetched_at.tzinfo is not None
+        and started_at <= fetched_at
+    )
+
+
+def _issue_records(
+    items: Iterable[GitHubItem], milestone_number: int
+) -> dict[int, tuple[GitHubItem, ...]]:
     grouped: defaultdict[int, dict[str, GitHubItem]] = defaultdict(dict)
     for item in items:
-        if item.kind is GitHubItemKind.ISSUE:
+        if (
+            item.kind is GitHubItemKind.ISSUE
+            and item.state.lower() == "open"
+            and item.milestone_number == milestone_number
+        ):
             key = _full_item_sort_key(item)
             current = grouped[item.number].get(key)
             if current is None or repr(item) < repr(current):
@@ -185,7 +234,9 @@ def _issue_records(items: Iterable[GitHubItem]) -> dict[int, tuple[GitHubItem, .
 
 
 def _unambiguously_typed_issues(
-    issues: dict[int, tuple[GitHubItem, ...]], policy: ReleasePolicy
+    issues: dict[int, tuple[GitHubItem, ...]],
+    policy: ReleasePolicy,
+    repository: str,
 ) -> tuple[GitHubItem, ...]:
     supported = {
         policy.code_change_label.lower(),
@@ -196,6 +247,12 @@ def _unambiguously_typed_issues(
         for records in issues.values()
         if len(records) == 1
         and len(_normalized_labels(records[0].labels).intersection(supported)) == 1
+        and _is_direct_url(
+            records[0].url,
+            repository,
+            "issues",
+            records[0].number,
+        )
     )
 
 
@@ -281,20 +338,70 @@ def _is_in_candidate(
     if candidate is None or pull.merge_commit_sha is None:
         return False
     comparison = candidate.comparison
-    if comparison.base_sha != pull.merge_commit_sha:
-        return False
-    if not _is_comparison_url(
-        comparison.url,
-        snapshot.repository_full_name,
+    return _is_valid_comparison(snapshot, pull.merge_commit_sha, comparison)
+
+
+def _is_valid_comparison(
+    snapshot: ReleaseSnapshot,
+    merge_commit_sha: str,
+    comparison: CommitComparison,
+) -> bool:
+    counts = (
+        comparison.ahead_by,
+        comparison.behind_by,
+        comparison.total_commits,
+    )
+    if (
+        not _is_sha(merge_commit_sha)
+        or not _is_sha(comparison.base_sha)
+        or not _is_sha(comparison.merge_base_sha)
+        or not _is_sha(comparison.head_sha)
+        or comparison.base_sha != merge_commit_sha
+        or comparison.merge_base_sha != comparison.base_sha
+        or comparison.head_sha != snapshot.candidate_sha
+        or any(
+            isinstance(count, bool) or not isinstance(count, int) or count < 0
+            for count in counts
+        )
+        or not _is_comparison_url(
+            comparison.url,
+            snapshot.repository_full_name,
+            comparison.base_sha,
+            comparison.head_sha,
+        )
     ):
         return False
-    if comparison.merge_base_sha != pull.merge_commit_sha:
-        return False
-    if comparison.behind_by != 0:
-        return False
     if comparison.status == "identical":
-        return comparison.ahead_by == 0 and comparison.total_commits == 0
-    return comparison.status == "ahead" and comparison.ahead_by > 0
+        return (
+            comparison.base_sha == comparison.head_sha
+            and comparison.ahead_by == 0
+            and comparison.behind_by == 0
+            and comparison.total_commits == 0
+            and not comparison.commits
+        )
+    if comparison.status != "ahead":
+        return False
+    commits = comparison.commits
+    if (
+        comparison.behind_by != 0
+        or comparison.ahead_by <= 0
+        or comparison.total_commits != comparison.ahead_by
+        or comparison.total_commits != len(commits)
+        or not commits
+        or commits[-1].sha != comparison.head_sha
+        or len({commit.sha for commit in commits}) != len(commits)
+    ):
+        return False
+    return all(
+        _is_sha(commit.sha)
+        and commit.committed_at.tzinfo is not None
+        and _is_commit_url(
+            commit.url,
+            snapshot.repository_full_name,
+            commit.sha,
+        )
+        for commit in commits
+    )
 
 
 def _unique_items(
@@ -436,14 +543,12 @@ def _linked_pull_evidence(snapshot: ReleaseSnapshot, pull_number: int) -> Eviden
 
 
 def _comparison_evidence(snapshot: ReleaseSnapshot, pull_number: int) -> EvidenceRef:
-    records = sorted(
-        (
-            comparison
-            for comparison in snapshot.comparisons
-            if comparison.pull_request_number == pull_number
-        ),
-        key=_full_comparison_sort_key,
-    )
+    canonical = {
+        _full_comparison_sort_key(comparison): comparison
+        for comparison in snapshot.comparisons
+        if comparison.pull_request_number == pull_number
+    }
+    records = sorted(canonical.values(), key=_full_comparison_sort_key)
     return _evidence(
         evidence_id=f"github-comparison-pr-{pull_number}",
         source_type="github_commit_comparison",
@@ -535,29 +640,56 @@ def _direct_url(repository: str, kind: str, number: int) -> str:
 
 
 def _is_direct_url(url: str, repository: str, kind: str, number: int) -> bool:
-    parsed = urlparse(url)
+    return _is_canonical_github_url(url, f"/{repository}/{kind}/{number}")
+
+
+def _is_comparison_url(url: str, repository: str, base_sha: str, head_sha: str) -> bool:
+    return _is_canonical_github_url(
+        url, f"/{repository}/compare/{base_sha}...{head_sha}"
+    )
+
+
+def _is_commit_url(url: str, repository: str, sha: str) -> bool:
+    return _is_canonical_github_url(url, f"/{repository}/commit/{sha}")
+
+
+def _is_canonical_github_url(url: str, expected_path: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        port = parsed.port
+        username = parsed.username
+        password = parsed.password
+    except (UnicodeError, ValueError):
+        return False
     return (
         parsed.scheme == "https"
         and parsed.netloc == "github.com"
-        and parsed.path == f"/{repository}/{kind}/{number}"
+        and hostname == "github.com"
+        and port is None
+        and username is None
+        and password is None
+        and parsed.path == expected_path
         and not parsed.params
         and not parsed.query
         and not parsed.fragment
     )
 
 
-def _is_comparison_url(url: str, repository: str) -> bool:
-    parsed = urlparse(url)
-    compare_path = f"/{repository}/compare/"
-    return (
-        parsed.scheme == "https"
-        and parsed.netloc == "github.com"
-        and parsed.path.startswith(compare_path)
-        and len(parsed.path) > len(compare_path)
-        and not parsed.params
-        and not parsed.query
-        and not parsed.fragment
+def _is_repository_name(repository: object) -> bool:
+    if not isinstance(repository, str):
+        return False
+    parts = repository.split("/")
+    return len(parts) == 2 and all(
+        bool(part)
+        and part not in {".", ".."}
+        and _REPOSITORY_PART.fullmatch(part) is not None
+        for part in parts
     )
+
+
+def _is_sha(value: object) -> bool:
+    return isinstance(value, str) and _SHA.fullmatch(value) is not None
 
 
 def _normalized_labels(labels: Iterable[str]) -> set[str]:
@@ -569,7 +701,7 @@ def _item_sort_key(item: GitHubItem) -> tuple[object, ...]:
         item.source_id,
         item.url,
         item.state,
-        tuple(sorted(item.labels, key=str.lower)),
+        tuple(_canonical_strings(item.labels)),
         item.updated_at,
     )
 
@@ -600,16 +732,20 @@ def _full_link_sort_key(release_link: ReleaseLink) -> str:
 
 def _item_facts(item: GitHubItem) -> object:
     facts = asdict(item)
-    facts["labels"] = sorted(item.labels, key=str.lower)
-    facts["assignees"] = sorted(item.assignees, key=str.lower)
+    facts["labels"] = _canonical_strings(item.labels)
+    facts["assignees"] = _canonical_strings(item.assignees)
     return _jsonable(facts)
 
 
 def _pull_facts(pull: GitHubPullRequest) -> object:
     facts = asdict(pull)
-    facts["labels"] = sorted(pull.labels, key=str.lower)
-    facts["assignees"] = sorted(pull.assignees, key=str.lower)
+    facts["labels"] = _canonical_strings(pull.labels)
+    facts["assignees"] = _canonical_strings(pull.assignees)
     return _jsonable(facts)
+
+
+def _canonical_strings(values: Iterable[str]) -> list[str]:
+    return sorted(set(values), key=lambda value: (value.lower(), value))
 
 
 def _jsonable(value: object) -> object:

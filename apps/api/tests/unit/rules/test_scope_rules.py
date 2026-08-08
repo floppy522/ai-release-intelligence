@@ -15,11 +15,14 @@ from release_intelligence.domain.models import (
     PullRequestComparison,
     ReleaseLink,
     ReleaseSnapshot,
+    SnapshotVersion,
+    SourceError,
 )
 from release_intelligence.domain.policy import ReleasePolicy
 from release_intelligence.domain.rules.scope import evaluate_scope
 from release_intelligence.ports.github import (
     CommitComparison,
+    GitHubCommit,
     GitHubItem,
     GitHubItemKind,
     GitHubPullRequest,
@@ -27,6 +30,9 @@ from release_intelligence.ports.github import (
 
 NOW = datetime(2026, 8, 7, 14, 30, tzinfo=UTC)
 REPOSITORY = "example/release-intelligence"
+BASE_SHA = "2" * 40
+MIDDLE_SHA = "3" * 40
+CANDIDATE_SHA = "4" * 40
 ISSUE_URL = f"https://github.com/{REPOSITORY}/issues/142"
 PULL_URL = f"https://github.com/{REPOSITORY}/pull/143"
 POLICY = ReleasePolicy(
@@ -47,27 +53,34 @@ def issue(
     labels: tuple[str, ...] = ("code-change",),
     state: str = "open",
     source_id: str | None = None,
+    milestone: int | None = 7,
+    url: str | None = None,
 ) -> GitHubItem:
     return GitHubItem(
         source_id=source_id or str(number * 10),
         number=number,
         kind=GitHubItemKind.ISSUE,
-        url=f"https://github.com/{REPOSITORY}/issues/{number}",
+        url=url or f"https://github.com/{REPOSITORY}/issues/{number}",
         state=state,
         labels=labels,
         assignees=("owner",),
-        milestone_number=7,
+        milestone_number=milestone,
         created_at=NOW - timedelta(days=20),
         updated_at=NOW - timedelta(hours=number % 10),
     )
 
 
-def pull_item(number: int = 143, *, milestone: int | None = 7) -> GitHubItem:
+def pull_item(
+    number: int = 143,
+    *,
+    milestone: int | None = 7,
+    url: str | None = None,
+) -> GitHubItem:
     return GitHubItem(
         source_id=str(number * 10),
         number=number,
         kind=GitHubItemKind.PULL_REQUEST,
-        url=f"https://github.com/{REPOSITORY}/pull/{number}",
+        url=url or f"https://github.com/{REPOSITORY}/pull/{number}",
         state="closed",
         labels=(),
         assignees=("owner",),
@@ -85,12 +98,13 @@ def pull(
     state: str = "closed",
     merged_at: datetime | None = NOW - timedelta(days=1),
     merge_sha: str | None = None,
+    url: str | None = None,
 ) -> GitHubPullRequest:
-    effective_merge_sha = merge_sha if merge_sha is not None else f"merge-{number}"
+    effective_merge_sha = merge_sha if merge_sha is not None else BASE_SHA
     return GitHubPullRequest(
         source_id=str(number * 10),
         number=number,
-        url=f"https://github.com/{REPOSITORY}/pull/{number}",
+        url=url or f"https://github.com/{REPOSITORY}/pull/{number}",
         state=state,
         labels=(),
         assignees=("owner",),
@@ -106,12 +120,17 @@ def pull(
     )
 
 
-def link(issue_number: int = 142, pull_number: int = 143) -> ReleaseLink:
+def link(
+    issue_number: int = 142,
+    pull_number: int = 143,
+    *,
+    url: str | None = None,
+) -> ReleaseLink:
     return ReleaseLink(
         source_id=f"link-{issue_number}-{pull_number}",
         issue_number=issue_number,
         pull_request_number=pull_number,
-        url=f"https://github.com/{REPOSITORY}/pull/{pull_number}",
+        url=url or f"https://github.com/{REPOSITORY}/pull/{pull_number}",
         created_at=NOW - timedelta(days=15),
     )
 
@@ -121,24 +140,60 @@ def comparison(
     *,
     status: str = "ahead",
     base_sha: str | None = None,
+    head_sha: str = CANDIDATE_SHA,
     merge_base_sha: str | None = None,
+    ahead_by: int | None = None,
+    behind_by: int | None = None,
+    total_commits: int | None = None,
+    commits: tuple[GitHubCommit, ...] | None = None,
+    url: str | None = None,
 ) -> PullRequestComparison:
-    effective_base = base_sha or f"merge-{pull_number}"
+    effective_base = base_sha or BASE_SHA
     effective_merge_base = merge_base_sha or effective_base
+    effective_ahead = (2 if status == "ahead" else 0) if ahead_by is None else ahead_by
+    effective_behind = (
+        (0 if status in {"ahead", "identical"} else 1)
+        if behind_by is None
+        else behind_by
+    )
+    effective_total = (
+        (2 if status == "ahead" else 0) if total_commits is None else total_commits
+    )
+    effective_commits = (
+        (
+            (
+                GitHubCommit(
+                    sha=MIDDLE_SHA,
+                    url=f"https://github.com/{REPOSITORY}/commit/{MIDDLE_SHA}",
+                    committed_at=NOW - timedelta(days=2),
+                ),
+                GitHubCommit(
+                    sha=CANDIDATE_SHA,
+                    url=f"https://github.com/{REPOSITORY}/commit/{CANDIDATE_SHA}",
+                    committed_at=NOW - timedelta(days=1),
+                ),
+            )
+            if status == "ahead"
+            else ()
+        )
+        if commits is None
+        else commits
+    )
     return PullRequestComparison(
         pull_request_number=pull_number,
         comparison=CommitComparison(
             status=status,
-            ahead_by=2 if status == "ahead" else 0,
-            behind_by=0 if status in {"ahead", "identical"} else 1,
-            total_commits=2 if status == "ahead" else 0,
-            url=(
-                f"https://github.com/{REPOSITORY}/compare/"
-                f"{effective_base}...candidate-sha"
+            ahead_by=effective_ahead,
+            behind_by=effective_behind,
+            total_commits=effective_total,
+            url=url
+            or (
+                f"https://github.com/{REPOSITORY}/compare/{effective_base}...{head_sha}"
             ),
             base_sha=effective_base,
             merge_base_sha=effective_merge_base,
-            commits=(),
+            commits=effective_commits,
+            head_sha=head_sha,
         ),
     )
 
@@ -163,10 +218,15 @@ def snapshot(
             url=ISSUE_URL,
             fingerprint="legacy-not-used",
         ),
+        snapshot_version=SnapshotVersion.GITHUB_V1,
         repository_id="987654",
         repository_full_name=REPOSITORY,
+        fetch_started_at=NOW - timedelta(minutes=1),
+        fetched_at=NOW,
+        complete=True,
+        source_errors=(),
         candidate_ref=POLICY.candidate_branch,
-        candidate_sha="candidate-sha",
+        candidate_sha=CANDIDATE_SHA,
         items=items if items is not None else (issue(), pull_item()),
         links=links if links is not None else (link(),),
         pull_requests=pulls if pulls is not None else (pull(),),
@@ -449,6 +509,28 @@ def test_issue_fingerprint_is_stable_under_set_like_field_order() -> None:
     assert first.evidence == reordered.evidence
 
 
+def test_case_ties_assignees_and_exact_duplicates_have_canonical_fingerprints() -> None:
+    first_issue = replace(
+        issue(labels=("code-change", "CODE-CHANGE", "backend", "backend")),
+        assignees=("Zulu", "alpha", "Zulu"),
+    )
+    reordered_issue = replace(
+        first_issue,
+        labels=("backend", "CODE-CHANGE", "code-change"),
+        assignees=("alpha", "Zulu"),
+    )
+    first = evaluate_scope(
+        snapshot(items=(first_issue,), links=(), pulls=(), comparisons=()),
+        POLICY,
+    )[0]
+    reordered = evaluate_scope(
+        snapshot(items=(reordered_issue,), links=(), pulls=(), comparisons=()),
+        POLICY,
+    )[0]
+
+    assert first.evidence == reordered.evidence
+
+
 def test_milestone_finding_fingerprints_the_pr_item_evidence() -> None:
     other_milestone = evaluate_scope(
         snapshot(items=(issue(), pull_item(milestone=8))), POLICY
@@ -507,10 +589,19 @@ def test_candidate_finding_fingerprints_the_comparison_evidence() -> None:
     assert _is_direct_github_issue_or_pr(behind.evidence[-1].url)
 
 
+def test_duplicate_comparison_evidence_is_idempotent() -> None:
+    invalid = comparison(
+        status="behind", merge_base_sha="1" * 40, head_sha=CANDIDATE_SHA
+    )
+    once = evaluate_scope(snapshot(comparisons=(invalid,)), POLICY)
+    duplicated = evaluate_scope(snapshot(comparisons=(invalid, invalid)), POLICY)
+
+    assert duplicated == once
+
+
 @pytest.mark.parametrize(
     "corrupt",
     [
-        lambda release: replace(release, candidate_ref="release/2026-08-17"),
         lambda release: replace(
             release,
             comparisons=(
@@ -528,7 +619,7 @@ def test_candidate_finding_fingerprints_the_comparison_evidence() -> None:
         ),
     ],
 )
-def test_candidate_evidence_must_be_bound_to_the_policy_and_repository(
+def test_candidate_evidence_must_be_bound_to_the_repository(
     corrupt,
 ) -> None:
     findings = evaluate_scope(corrupt(snapshot()), POLICY)
@@ -538,7 +629,7 @@ def test_candidate_evidence_must_be_bound_to_the_policy_and_repository(
     )
 
 
-def test_github_comparison_url_may_preserve_branch_names() -> None:
+def test_comparison_url_must_bind_exact_base_and_head_shas() -> None:
     release = snapshot()
     branch_url = f"https://github.com/{REPOSITORY}/compare/main...release/2026-08-10"
     release = replace(
@@ -554,7 +645,261 @@ def test_github_comparison_url_may_preserve_branch_names() -> None:
         ),
     )
 
+    findings = evaluate_scope(release, POLICY)
+
+    assert tuple(finding.rule_id for finding in findings) == (
+        "scope.change_requires_candidate_inclusion",
+    )
+
+
+def test_identical_comparison_is_valid_only_for_the_candidate_commit() -> None:
+    release = snapshot(
+        pulls=(pull(merge_sha=CANDIDATE_SHA),),
+        comparisons=(
+            comparison(
+                status="identical",
+                base_sha=CANDIDATE_SHA,
+                head_sha=CANDIDATE_SHA,
+                merge_base_sha=CANDIDATE_SHA,
+            ),
+        ),
+    )
+
     assert evaluate_scope(release, POLICY) == ()
+
+
+@pytest.mark.parametrize(
+    "invalid_comparison",
+    [
+        comparison(ahead_by=-1),
+        comparison(behind_by=-1),
+        comparison(total_commits=-1),
+        comparison(total_commits=1),
+        comparison(ahead_by=1),
+        comparison(commits=()),
+        comparison(
+            commits=(
+                GitHubCommit(
+                    sha=MIDDLE_SHA,
+                    url=f"https://github.com/{REPOSITORY}/commit/{MIDDLE_SHA}",
+                    committed_at=NOW,
+                ),
+                GitHubCommit(
+                    sha=MIDDLE_SHA,
+                    url=f"https://github.com/{REPOSITORY}/commit/{MIDDLE_SHA}",
+                    committed_at=NOW,
+                ),
+            )
+        ),
+        comparison(
+            commits=(
+                GitHubCommit(
+                    sha=MIDDLE_SHA,
+                    url=f"https://github.com/{REPOSITORY}/commit/{MIDDLE_SHA}",
+                    committed_at=NOW,
+                ),
+                GitHubCommit(
+                    sha="5" * 40,
+                    url=f"https://github.com/{REPOSITORY}/commit/{'5' * 40}",
+                    committed_at=NOW,
+                ),
+            )
+        ),
+        comparison(head_sha="5" * 40),
+        comparison(merge_base_sha="6" * 40),
+        comparison(
+            commits=(
+                GitHubCommit(
+                    sha=MIDDLE_SHA,
+                    url="https://github.com/attacker/repo/commit/" + MIDDLE_SHA,
+                    committed_at=NOW,
+                ),
+                GitHubCommit(
+                    sha=CANDIDATE_SHA,
+                    url=f"https://github.com/{REPOSITORY}/commit/{CANDIDATE_SHA}",
+                    committed_at=NOW,
+                ),
+            )
+        ),
+        comparison(
+            commits=(
+                GitHubCommit(
+                    sha=MIDDLE_SHA,
+                    url=f"https://github.com/{REPOSITORY}/commit/{MIDDLE_SHA}",
+                    committed_at=NOW.replace(tzinfo=None),
+                ),
+                GitHubCommit(
+                    sha=CANDIDATE_SHA,
+                    url=f"https://github.com/{REPOSITORY}/commit/{CANDIDATE_SHA}",
+                    committed_at=NOW,
+                ),
+            )
+        ),
+        comparison(status="diverged", behind_by=0),
+        comparison(
+            status="identical",
+            base_sha=CANDIDATE_SHA,
+            head_sha=CANDIDATE_SHA,
+            merge_base_sha=CANDIDATE_SHA,
+            ahead_by=1,
+            total_commits=1,
+            commits=(
+                GitHubCommit(
+                    sha=CANDIDATE_SHA,
+                    url=f"https://github.com/{REPOSITORY}/commit/{CANDIDATE_SHA}",
+                    committed_at=NOW,
+                ),
+            ),
+        ),
+    ],
+)
+def test_comparison_matrix_fails_closed(
+    invalid_comparison: PullRequestComparison,
+) -> None:
+    release = snapshot(
+        pulls=(
+            pull(
+                merge_sha=(
+                    CANDIDATE_SHA
+                    if invalid_comparison.comparison.status == "identical"
+                    else BASE_SHA
+                )
+            ),
+        ),
+        comparisons=(invalid_comparison,),
+    )
+
+    findings = evaluate_scope(release, POLICY)
+
+    assert tuple(finding.rule_id for finding in findings) == (
+        "scope.change_requires_candidate_inclusion",
+    )
+
+
+def test_closed_and_foreign_milestone_issues_are_outside_scope() -> None:
+    release = snapshot(
+        items=(
+            issue(141, labels=(), state="closed"),
+            issue(142, labels=(), milestone=8),
+        ),
+        links=(),
+        pulls=(),
+        comparisons=(),
+    )
+
+    assert evaluate_scope(release, POLICY) == ()
+
+
+def test_foreign_duplicate_does_not_make_current_issue_ambiguous() -> None:
+    release = snapshot(
+        items=(
+            issue(labels=("code-change",)),
+            issue(labels=(), milestone=8, source_id="foreign-record"),
+        ),
+        links=(),
+        pulls=(),
+        comparisons=(),
+    )
+
+    findings = evaluate_scope(release, POLICY)
+
+    assert tuple(finding.rule_id for finding in findings) == (
+        "scope.code_change_requires_pr",
+    )
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        lambda release: replace(release, snapshot_version=SnapshotVersion.LEGACY),
+        lambda release: replace(release, complete=False),
+        lambda release: replace(
+            release,
+            source_errors=(SourceError(code="github.partial", message="partial"),),
+        ),
+        lambda release: replace(release, milestone_number=8),
+        lambda release: replace(release, candidate_ref="release/2026-08-17"),
+        lambda release: replace(release, candidate_sha=""),
+        lambda release: replace(release, candidate_sha="not-a-sha"),
+        lambda release: replace(release, candidate_sha=None),
+        lambda release: replace(release, repository_id=""),
+        lambda release: replace(release, repository_id=None),
+        lambda release: replace(release, repository_full_name="invalid"),
+        lambda release: replace(release, repository_full_name=None),
+        lambda release: replace(release, fetch_started_at=None),
+        lambda release: replace(release, fetched_at=None),
+        lambda release: replace(release, fetch_started_at=NOW.replace(tzinfo=None)),
+        lambda release: replace(release, fetch_started_at="invalid"),
+        lambda release: replace(release, fetch_started_at=NOW + timedelta(minutes=1)),
+    ],
+)
+def test_invalid_snapshot_prerequisites_do_not_infer_absence_findings(corrupt) -> None:
+    missing_pr = snapshot(items=(issue(),), links=(), pulls=(), comparisons=())
+
+    assert evaluate_scope(corrupt(missing_pr), POLICY) == ()
+
+
+MALFORMED_URLS = [
+    "https://user:secret@github.com/example/release-intelligence/pull/143",
+    "https://github.com:443/example/release-intelligence/pull/143",
+    "https://github.com:bad/example/release-intelligence/pull/143",
+    "https://[::1/example/release-intelligence/pull/143",
+    "https://\ud800.github.com/example/release-intelligence/pull/143",
+]
+
+
+@pytest.mark.parametrize("malformed_url", MALFORMED_URLS)
+@pytest.mark.parametrize(
+    ("corrupt", "expected_rule"),
+    [
+        (
+            lambda release, url: replace(release, links=(link(url=url),)),
+            "scope.code_change_requires_pr",
+        ),
+        (
+            lambda release, url: replace(release, pull_requests=(pull(url=url),)),
+            "scope.pr_requires_milestone",
+        ),
+        (
+            lambda release, url: replace(release, items=(issue(), pull_item(url=url))),
+            "scope.pr_requires_milestone",
+        ),
+        (
+            lambda release, url: replace(release, items=(issue(url=url), pull_item())),
+            "scope.exactly_one_type",
+        ),
+        (
+            lambda release, url: replace(release, comparisons=(comparison(url=url),)),
+            "scope.change_requires_candidate_inclusion",
+        ),
+    ],
+)
+def test_malformed_evidence_urls_never_crash_or_pass(
+    malformed_url: str, corrupt, expected_rule: str
+) -> None:
+    findings = evaluate_scope(corrupt(snapshot(), malformed_url), POLICY)
+
+    assert tuple(finding.rule_id for finding in findings) == (expected_rule,)
+    assert all(
+        _is_direct_github_issue_or_pr(ref.url)
+        for finding in findings
+        for ref in finding.evidence
+    )
+
+
+@pytest.mark.parametrize(
+    "repository",
+    ["owner", "owner/repo/extra", "../repo", "owner/repo@attacker", "\ud800/repo"],
+)
+def test_invalid_repository_identity_never_synthesizes_evidence(
+    repository: str,
+) -> None:
+    missing_pr = replace(
+        snapshot(items=(issue(),), links=(), pulls=(), comparisons=()),
+        repository_full_name=repository,
+    )
+
+    assert evaluate_scope(missing_pr, POLICY) == ()
 
 
 def test_duplicate_supported_label_is_one_logical_type() -> None:
