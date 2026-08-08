@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import re
 from collections.abc import Iterable
 
@@ -9,7 +10,7 @@ from release_intelligence.domain.models import (
     ReleaseSnapshot,
 )
 from release_intelligence.domain.policy import ReleasePolicy
-from release_intelligence.domain.rules.blockers import _current_issue_records
+from release_intelligence.domain.rules.blockers import _analyze_issue_evidence
 from release_intelligence.domain.rules.checks import (
     _analyze_evidence,
     _canonical_github_path,
@@ -31,9 +32,20 @@ _FIELDS = (
     "Migration evidence",
 )
 _REQUIRED_SECTIONS = _FIELDS[:3]
-_HEADING = re.compile(r"^#{1,6}[ \t]+(.+?)[ \t]*$")
+_HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$")
+_ATX_CLOSING = re.compile(r"[ \t]+#+[ \t]*$")
+_FENCE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
+_HTML_BLOCK = re.compile(
+    r"^[ ]{0,3}<(?P<tag>address|article|aside|blockquote|details|dialog|div|"
+    r"dl|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|main|menu|"
+    r"nav|ol|p|pre|script|section|style|summary|table|ul)(?:[ \t>/]|$)",
+    re.IGNORECASE,
+)
 _UNCHECKED = re.compile(r"(?m)^[ \t]*[-*][ \t]+\[[ \t]\]")
-_HTML_COMMENT = re.compile(r"(?s)^<!--.*-->$")
+_HTML_COMMENT = re.compile(r"(?s)<!--.*?-->")
+_HTML_TAG = re.compile(r"(?s)<[^>]*>")
+_LIST_MARKER = re.compile(r"(?m)^[ \t]*(?:[-*+]|\d+[.)])[ \t]+")
+_PRESENTATION = re.compile(r"[*_~`]+")
 _PLACEHOLDERS = frozenset(
     {
         "-",
@@ -65,13 +77,26 @@ def evaluate_operations(
     if prerequisite_errors:
         raise OperationsEvidenceError(findings=(), codes=prerequisite_errors)
 
-    items, issue_codes = _current_issue_records(snapshot)
+    evidence = _analyze_issue_evidence(snapshot)
     findings: list[ReadinessFinding] = []
-    codes = list(issue_codes)
-    for item in items:
-        if policy.release_ops_label.casefold() not in _normalized_labels(item.labels):
+    codes = list(evidence.codes)
+    codes.extend(
+        f"operations.invalid_owner:{number}"
+        for number in evidence.invalid_owner_numbers
+    )
+    for item in evidence.items:
+        if (
+            item.state != "open"
+            or item.milestone_number != snapshot.milestone_number
+            or policy.release_ops_label.casefold()
+            not in _normalized_labels(item.labels)
+        ):
             continue
-        item_findings, item_codes = _evaluate_item(snapshot, item)
+        item_findings, item_codes = _evaluate_item(
+            snapshot,
+            item,
+            owner_valid=item.number not in evidence.invalid_owner_numbers,
+        )
         findings.extend(item_findings)
         codes.extend(item_codes)
 
@@ -82,15 +107,15 @@ def evaluate_operations(
 
 
 def _evaluate_item(
-    snapshot: ReleaseSnapshot, item: GitHubItem
+    snapshot: ReleaseSnapshot,
+    item: GitHubItem,
+    *,
+    owner_valid: bool,
 ) -> tuple[tuple[ReadinessFinding, ...], tuple[str, ...]]:
-    sections, parse_codes = _parse_sections(item)
-    if parse_codes:
-        return (), parse_codes
-
     issue_evidence = (_issue_evidence(snapshot, item),)
     findings: list[ReadinessFinding] = []
-    if not item.assignees:
+    codes: list[str] = []
+    if owner_valid and not item.assignees:
         findings.append(
             _finding(
                 "operations.owner_required",
@@ -99,14 +124,11 @@ def _evaluate_item(
                 issue_evidence,
             )
         )
-    elif any(
-        not isinstance(owner, str)
-        or owner != owner.strip()
-        or not owner
-        or not owner.isprintable()
-        for owner in item.assignees
-    ):
-        return (), (f"operations.invalid_owner:{item.number}",)
+
+    sections, parse_codes = _parse_sections(item)
+    codes.extend(parse_codes)
+    if parse_codes:
+        return tuple(findings), tuple(codes)
 
     for section in _REQUIRED_SECTIONS:
         if not _valid_section(sections.get(section)):
@@ -125,9 +147,8 @@ def _evaluate_item(
             snapshot, item, migration
         )
         findings.extend(migration_findings)
-        if migration_codes:
-            return tuple(findings), migration_codes
-    return tuple(findings), ()
+        codes.extend(migration_codes)
+    return tuple(findings), tuple(codes)
 
 
 def _parse_sections(
@@ -136,22 +157,75 @@ def _parse_sections(
     if not isinstance(item.body, str) or len(item.body) > 65_536:
         return {}, (f"operations.invalid_body:{item.number}",)
 
-    values: dict[str, list[str]] = {field: [] for field in _FIELDS}
+    values: dict[str, dict[str, str]] = {field: {} for field in _FIELDS}
     current: str | None = None
+    current_level: int | None = None
     buffer: list[str] = []
+    fence_character: str | None = None
+    fence_length = 0
+    html_end: str | None = None
 
     def finish() -> None:
-        nonlocal buffer
+        nonlocal buffer, current, current_level
         if current is not None:
-            values[current].append("\n".join(buffer).strip())
+            value = _normalize_field_value(buffer)
+            values[current].setdefault(value, value)
         buffer = []
+        current = None
+        current_level = None
 
     for line in item.body.splitlines():
+        if fence_character is not None:
+            if current is not None:
+                buffer.append(line)
+            stripped = line.lstrip(" ")
+            if (
+                len(line) - len(stripped) <= 3
+                and stripped.startswith(fence_character * fence_length)
+                and not stripped.lstrip(fence_character).strip()
+            ):
+                fence_character = None
+                fence_length = 0
+            continue
+
+        fence = _FENCE.match(line)
+        if fence is not None:
+            marker = fence.group(1)
+            fence_character = marker[0]
+            fence_length = len(marker)
+            if current is not None:
+                buffer.append(line)
+            continue
+
+        if html_end is not None:
+            if current is not None:
+                buffer.append(line)
+            if html_end in line.casefold():
+                html_end = None
+            continue
+
+        html_end = _html_block_end(line)
+        if html_end is not None:
+            if current is not None:
+                buffer.append(line)
+            if html_end in line.casefold()[line.casefold().find("<") + 1 :]:
+                html_end = None
+            continue
+
         heading = _HEADING.fullmatch(line)
         if heading is not None:
+            level = len(heading.group(1))
+            if (
+                current is not None
+                and current_level is not None
+                and level > current_level
+            ):
+                buffer.append(line)
+                continue
             finish()
-            title = heading.group(1)
+            title = _ATX_CLOSING.sub("", heading.group(2)).strip()
             current = title if title in values else None
+            current_level = level if current is not None else None
             continue
         if current is not None:
             buffer.append(line)
@@ -160,20 +234,50 @@ def _parse_sections(
     if any(len(candidates) > 1 for candidates in values.values()):
         return {}, (f"operations.conflicting_fields:{item.number}",)
     return {
-        field: candidates[0] for field, candidates in values.items() if candidates
+        field: next(iter(candidates.values()))
+        for field, candidates in values.items()
+        if candidates
     }, ()
+
+
+def _normalize_field_value(lines: list[str]) -> str:
+    return "\n".join(line.rstrip() for line in lines).strip()
+
+
+def _html_block_end(line: str) -> str | None:
+    stripped = line.lstrip(" ")
+    if len(line) - len(stripped) > 3:
+        return None
+    folded = stripped.casefold()
+    if folded.startswith("<!--"):
+        return "-->"
+    block = _HTML_BLOCK.match(line)
+    if block is None:
+        return None
+    tag = block.group("tag").casefold()
+    if tag == "hr":
+        return None
+    return f"</{tag}>"
 
 
 def _valid_section(value: str | None) -> bool:
     if value is None:
         return False
-    canonical = value.strip()
+    canonical = _visible_text(value)
     return (
         bool(canonical)
         and canonical.casefold() not in _PLACEHOLDERS
-        and _HTML_COMMENT.fullmatch(canonical) is None
-        and _UNCHECKED.search(canonical) is None
+        and _UNCHECKED.search(value) is None
     )
+
+
+def _visible_text(value: str) -> str:
+    visible = html.unescape(value)
+    visible = _HTML_COMMENT.sub(" ", visible)
+    visible = _HTML_TAG.sub(" ", visible)
+    visible = _LIST_MARKER.sub("", visible)
+    visible = _PRESENTATION.sub("", visible)
+    return " ".join(visible.split())
 
 
 def _evaluate_migration(
@@ -190,13 +294,14 @@ def _evaluate_migration(
         return (), (f"migration.invalid_evidence:{item.number}",)
 
     check_state = _analyze_evidence(snapshot)
-    if check_state.codes:
-        return (), check_state.codes
     matches = tuple(check for check in check_state.checks if check.url == migration_url)
     if len(matches) > 1:
         return (), (f"migration.conflicting_checks:{item.number}",)
     if matches and _is_success(matches[0]):
-        return (), ()
+        return (), check_state.codes
+
+    if not matches and any(check.url == migration_url for check in snapshot.checks):
+        return (), check_state.codes
 
     evidence = [_issue_evidence(snapshot, item)]
     if matches:
@@ -213,7 +318,7 @@ def _evaluate_migration(
                 tuple(evidence),
             ),
         ),
-        (),
+        check_state.codes,
     )
 
 

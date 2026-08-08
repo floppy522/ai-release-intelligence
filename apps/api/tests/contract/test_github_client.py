@@ -139,6 +139,45 @@ async def test_issue_body_is_bounded_before_normalization() -> None:
         await http.aclose()
 
 
+@pytest.mark.parametrize(
+    "login",
+    [
+        "release owner",
+        " release-owner",
+        "release-owner ",
+        "rélease-owner",
+        "release\nowner",
+        "-release-owner",
+        "release-owner-",
+        "release--owner",
+        "x" * 40,
+    ],
+)
+async def test_issue_assignee_requires_canonical_github_login(login: str) -> None:
+    payload = _fixture("milestone_items.json")
+    assert isinstance(payload, list)
+    malformed = {**payload[0], "assignees": [{"login": login}]}
+    client, http = _client(lambda request: _response(request, 200, [malformed]))
+    try:
+        with pytest.raises(GitHubPartialData, match="incomplete"):
+            await client.list_milestone_items(REPO, 7)
+    finally:
+        await http.aclose()
+
+
+async def test_issue_assignee_accepts_maximum_length_canonical_login() -> None:
+    payload = _fixture("milestone_items.json")
+    assert isinstance(payload, list)
+    valid = {**payload[0], "assignees": [{"login": "x" * 39}]}
+    client, http = _client(lambda request: _response(request, 200, [valid]))
+    try:
+        items = await client.list_milestone_items(REPO, 7)
+    finally:
+        await http.aclose()
+
+    assert items[0].assignees == ("x" * 39,)
+
+
 async def test_issue_timeline_maps_only_pull_request_cross_references() -> None:
     payload = _fixture("issue_timeline.json")
     client, http = _client(lambda request: _response(request, 200, payload))

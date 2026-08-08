@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from itertools import permutations
+from typing import cast
 
 import pytest
 
@@ -136,7 +137,7 @@ def test_set_like_issue_fields_do_not_create_false_conflicts() -> None:
 def test_conflicting_blocker_records_are_insufficient_but_preserve_other_blockers() -> (
     None
 ):
-    conflict = replace(_issue(42), source_id="conflict")
+    conflict = replace(_issue(42), source_id="4200")
 
     with pytest.raises(BlockerEvidenceError) as raised:
         evaluate_blockers(_snapshot(_issue(41), _issue(42), conflict), POLICY)
@@ -156,3 +157,80 @@ def test_cross_repository_blocker_url_is_typed_insufficiency() -> None:
 
     assert raised.value.findings == ()
     assert raised.value.codes == ("issue.invalid_url:41",)
+
+
+def test_open_and_closed_records_for_one_issue_are_conflicting() -> None:
+    with pytest.raises(BlockerEvidenceError) as raised:
+        evaluate_blockers(
+            _snapshot(_issue(state="open"), _issue(state="closed")), POLICY
+        )
+
+    assert raised.value.findings == ()
+    assert raised.value.codes == ("issue.conflicting_records:41",)
+
+
+def test_unknown_release_labeled_state_is_typed_insufficiency() -> None:
+    with pytest.raises(BlockerEvidenceError) as raised:
+        evaluate_blockers(_snapshot(_issue(state="mystery")), POLICY)
+
+    assert raised.value.findings == ()
+    assert raised.value.codes == ("issue.invalid_state:41",)
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "expected_code"),
+    [
+        (lambda item: replace(item, number=0), "issue.invalid_coordinate:"),
+        (lambda item: replace(item, number=2**63), "issue.invalid_coordinate:"),
+        (lambda item: replace(item, source_id="0"), "issue.invalid_source_id:41"),
+        (
+            lambda item: replace(item, source_id=str(2**63)),
+            "issue.invalid_source_id:41",
+        ),
+        (
+            lambda item: replace(item, milestone_number=cast(int, True)),
+            "issue.invalid_milestone:41",
+        ),
+        (
+            lambda item: replace(item, created_at=NOW.replace(tzinfo=None)),
+            "issue.invalid_timestamps:41",
+        ),
+        (
+            lambda item: replace(item, created_at=NOW, updated_at=NOW.replace(hour=11)),
+            "issue.invalid_timestamps:41",
+        ),
+        (
+            lambda item: replace(item, labels=("release-blocker", "")),
+            "issue.invalid_labels:41",
+        ),
+        (
+            lambda item: replace(item, assignees=("x" * 256,)),
+            "issue.invalid_assignees:41",
+        ),
+        (
+            lambda item: replace(item, body="x" * 65_537),
+            "issue.invalid_body:41",
+        ),
+        (
+            lambda item: replace(item, kind=cast(GitHubItemKind, "unknown")),
+            "issue.invalid_kind:41",
+        ),
+        (
+            lambda item: replace(item, url=cast(str, ["unsafe"])),
+            "issue.invalid_url:41",
+        ),
+    ],
+)
+def test_malformed_issue_evidence_is_bounded_typed_insufficiency(
+    corrupt, expected_code: str
+) -> None:
+    with pytest.raises(BlockerEvidenceError) as raised:
+        evaluate_blockers(_snapshot(corrupt(_issue())), POLICY)
+
+    assert raised.value.findings == ()
+    if expected_code.endswith(":"):
+        assert len(raised.value.codes) == 1
+        assert raised.value.codes[0].startswith(expected_code)
+        assert len(raised.value.codes[0]) <= 64
+    else:
+        assert raised.value.codes == (expected_code,)

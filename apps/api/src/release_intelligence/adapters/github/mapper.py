@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Never
@@ -23,6 +24,8 @@ class GitHubPayloadError(ValueError):
 
 
 MAX_ISSUE_BODY_LENGTH = 65_536
+MAX_ASSIGNEES = 100
+_GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
 
 
 def _invalid() -> Never:
@@ -88,9 +91,13 @@ def _labels(value: object) -> tuple[str, ...]:
 
 def _assignees(value: object) -> tuple[str, ...]:
     assignees: list[str] = []
-    for item in _list(value):
+    raw = _list(value)
+    if len(raw) > MAX_ASSIGNEES:
+        return _invalid()
+    for item in raw:
         login = _string(_mapping(item).get("login"))
-        assert login is not None
+        if login is None or _GITHUB_LOGIN.fullmatch(login) is None:
+            return _invalid()
         assignees.append(login)
     return tuple(assignees)
 
