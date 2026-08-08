@@ -26,6 +26,7 @@ from release_intelligence.application.analyze_release import (
 )
 from release_intelligence.domain.models import ReleaseSnapshot, ReleaseStatus
 from release_intelligence.ports.github import GitHubUnauthorized, RepoRef
+from release_intelligence.ports.policies import PolicyPersistenceError
 from release_intelligence.ports.repositories import IncompatibleSnapshotError
 
 router = APIRouter(prefix="/api/analyses", tags=["analyses"])
@@ -108,7 +109,7 @@ async def create_analysis(
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "GitHub repository access denied"
         ) from None
-    except SQLAlchemyError:
+    except (PolicyPersistenceError, SQLAlchemyError):
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Analysis persistence unavailable",

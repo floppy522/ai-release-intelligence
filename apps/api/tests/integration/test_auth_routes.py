@@ -29,8 +29,10 @@ from release_intelligence.domain.models import (
     ReadinessFinding,
     ReleaseSnapshot,
 )
+from release_intelligence.domain.policy import ReleasePolicy
 from release_intelligence.main import create_app
 from release_intelligence.ports.auth import AuthPersistenceError
+from release_intelligence.ports.policies import PolicyRecord
 from release_intelligence.ports.repositories import StoredAnalysisRun
 from release_intelligence.security.crypto import CredentialCipher, token_digest
 
@@ -184,6 +186,29 @@ class FakeManagedAnalysisRepository:
     async def replace_snapshot(self, run_id: UUID, snapshot: ReleaseSnapshot) -> None:
         del run_id, snapshot
         raise AssertionError("snapshots are immutable")
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeManagedPolicyRepository:
+    def __init__(self) -> None:
+        self.requested_repository_ids: list[str] = []
+        self.closed = False
+
+    async def get_latest(self, repository_id: str) -> PolicyRecord | None:
+        self.requested_repository_ids.append(repository_id)
+        return None
+
+    async def create_version(
+        self,
+        *,
+        repository_id: str,
+        policy: ReleasePolicy,
+        expected_version: int | None,
+    ) -> PolicyRecord:
+        del repository_id, policy, expected_version
+        raise AssertionError("analysis must not create policy versions")
 
     async def close(self) -> None:
         self.closed = True
@@ -513,6 +538,7 @@ async def test_production_wiring_persists_token_rate_limit_without_exposing_toke
     oauth = FakeOAuthGateway()
     shared_client = RateLimitedTokenHttpClient()
     repository = FakeManagedAnalysisRepository()
+    policy_repository = FakeManagedPolicyRepository()
     settings = AppSettings(
         database_url="postgresql+asyncpg://postgres:postgres@localhost/test",
         credential_encryption_key=Fernet.generate_key().decode(),
@@ -529,6 +555,7 @@ async def test_production_wiring_persists_token_rate_limit_without_exposing_toke
         clock=clock,
         http_client_factory=lambda: shared_client,
         analysis_repository_factory=lambda _url, _clock: repository,
+        policy_repository_factory=lambda _url: policy_repository,
     )
 
     async with app.router.lifespan_context(app), httpx.AsyncClient(
@@ -559,6 +586,8 @@ async def test_production_wiring_persists_token_rate_limit_without_exposing_toke
     )
     assert not hasattr(repository, "installation_token")
     assert repository.closed is True
+    assert policy_repository.requested_repository_ids == ["987654"]
+    assert policy_repository.closed is True
 
 
 def test_deployment_key_hashing_contract_does_not_store_session_or_csrf_tokens() -> (

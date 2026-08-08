@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -12,11 +12,18 @@ from release_intelligence.domain.models import (
     EvidenceRef,
     PullRequestComparison,
     ReadinessAssessment,
+    ReadinessFinding,
     ReleaseLink,
     ReleaseSnapshot,
     ReleaseStatus,
     SnapshotVersion,
     SourceError,
+)
+from release_intelligence.domain.policy import ReleasePolicy
+from release_intelligence.domain.rules.checks import (
+    CheckDecision,
+    CheckEvidenceError,
+    evaluate_checks,
 )
 from release_intelligence.ports.github import (
     GitHubCheck,
@@ -32,6 +39,7 @@ from release_intelligence.ports.github import (
     GitHubUnauthorized,
     RepoRef,
 )
+from release_intelligence.ports.policies import PolicyRepositoryPort
 from release_intelligence.ports.repositories import (
     AnalysisRepositoryPort,
     StoredAnalysisRun,
@@ -73,10 +81,12 @@ class AnalysisService:
         *,
         loader_factory: LoaderFactory,
         repository: AnalysisRepositoryPort,
+        policy_repository: PolicyRepositoryPort | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._loader_factory = loader_factory
         self._repository = repository
+        self._policy_repository = policy_repository
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def run(self, request: AnalysisRequest, actor: str) -> UUID:
@@ -107,8 +117,19 @@ class AnalysisService:
                     message="GitHub returned incomplete release evidence",
                 ),
             )
+        policy_record = (
+            await self._policy_repository.get_latest(request.repository_id)
+            if self._policy_repository is not None
+            else None
+        )
         now = self._now()
-        assessment = assess(snapshot, policy=None, decisions=(), now=now)
+        policy = policy_record.policy if policy_record is not None else None
+        policy_version = (
+            f"configuration:{policy_record.version}"
+            if policy_record is not None
+            else "default-v1"
+        )
+        assessment = assess(snapshot, policy=policy, decisions=(), now=now)
         source_fetched_at = snapshot.fetched_at
         if source_fetched_at is None:
             raise ValueError("loaded snapshot requires fetched_at")
@@ -116,7 +137,7 @@ class AnalysisService:
             snapshot=snapshot,
             findings=assessment.findings,
             assessment=assessment,
-            policy_version="default-v1",
+            policy_version=policy_version,
             source_fetched_at=source_fetched_at,
         )
 
@@ -442,12 +463,11 @@ def assess_fixture_release() -> ReadinessAssessment:
 
 def assess(
     snapshot: ReleaseSnapshot,
-    policy: object,
-    decisions: tuple[object, ...],
+    policy: ReleasePolicy | None,
+    decisions: Iterable[CheckDecision],
     *,
     now: datetime,
 ) -> ReadinessAssessment:
-    del policy, decisions
     if snapshot.snapshot_version is SnapshotVersion.LEGACY:
         trusted_legacy_fixture = (
             snapshot.repository_id == "fixture:demo"
@@ -504,4 +524,38 @@ def assess(
         return ReadinessAssessment(
             status=ReleaseStatus.INSUFFICIENT_DATA, findings=()
         )
-    return assess_release(snapshot)
+    base_assessment = assess_release(snapshot)
+    if policy is None:
+        return base_assessment
+    try:
+        check_findings = evaluate_checks(snapshot, policy, decisions=decisions)
+    except CheckEvidenceError as error:
+        findings = _ordered_findings((*base_assessment.findings, *error.findings))
+        return ReadinessAssessment(
+            status=ReleaseStatus.INSUFFICIENT_DATA,
+            findings=findings,
+        )
+    findings = _ordered_findings((*base_assessment.findings, *check_findings))
+    if any(finding.blocks_release for finding in findings):
+        status = ReleaseStatus.NOT_READY
+    elif any(finding.requires_decision for finding in findings):
+        status = ReleaseStatus.NEEDS_DECISION
+    else:
+        status = ReleaseStatus.READY
+    return ReadinessAssessment(status=status, findings=findings)
+
+
+def _ordered_findings(
+    findings: Iterable[ReadinessFinding],
+) -> tuple[ReadinessFinding, ...]:
+    return tuple(
+        sorted(
+            findings,
+            key=lambda finding: (
+                finding.rule_id,
+                finding.summary,
+                finding.required_action,
+                tuple(evidence.fingerprint for evidence in finding.evidence),
+            ),
+        )
+    )

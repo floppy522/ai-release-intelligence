@@ -359,6 +359,52 @@ async def test_concurrent_decisions_form_one_serial_lineage(
     assert sorted(row["decision_sequence"] for row in rows) == [1, 2]
 
 
+async def test_repository_retention_cascade_removes_a_two_decision_lineage(
+    repository: AnalysisRepository,
+    postgres: asyncpg.Connection,
+    decision_run: tuple[UUID, UUID, UUID, str],
+) -> None:
+    run_id, finding_id, _blocking_id, fingerprint = decision_run
+    service = DecisionService(clock=lambda: NOW, store=repository)
+    await service.record_for_run(
+        run_id=run_id,
+        finding_id=finding_id,
+        fingerprint=fingerprint,
+        kind=DecisionKind.ACCEPTED_RISK,
+        reason="Reviewed by release lead",
+        actor="github:7",
+        authorized_repository_id=REPOSITORY_ID,
+    )
+    await service.record_for_run(
+        run_id=run_id,
+        finding_id=finding_id,
+        fingerprint=fingerprint,
+        kind=DecisionKind.RELEASE_BLOCKER,
+        reason="New evidence requires remediation",
+        actor="github:8",
+        authorized_repository_id=REPOSITORY_ID,
+    )
+    latest_id = await postgres.fetchval(
+        "SELECT id FROM human_decisions WHERE analysis_run_id = $1 "
+        "ORDER BY decision_sequence DESC LIMIT 1",
+        run_id,
+    )
+
+    with pytest.raises(asyncpg.PostgresError, match="immutable analysis records"):
+        await postgres.execute(
+            "DELETE FROM human_decisions WHERE id = $1", latest_id
+        )
+
+    await postgres.execute(
+        "DELETE FROM repository_connections "
+        "WHERE external_repository_id = $1",
+        REPOSITORY_ID,
+    )
+
+    assert await postgres.fetchval("SELECT count(*) FROM human_decisions") == 0
+    assert await postgres.fetchval("SELECT count(*) FROM repository_connections") == 0
+
+
 @pytest.mark.parametrize("case", ["unknown", "stale", "noneligible", "repository"])
 async def test_unknown_stale_noneligible_and_repository_mismatch_fail_closed(
     repository: AnalysisRepository,

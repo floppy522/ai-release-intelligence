@@ -25,12 +25,16 @@ from release_intelligence.domain.models import (
     SnapshotVersion,
     SourceError,
 )
+from release_intelligence.domain.policy import CheckCategory, ReleasePolicy
 from release_intelligence.main import create_app
 from release_intelligence.ports.github import (
+    GitHubCheck,
     GitHubPartialData,
     GitHubRateLimited,
     GitHubUnauthorized,
+    RepoRef,
 )
+from release_intelligence.ports.policies import PolicyPersistenceError, PolicyRecord
 from release_intelligence.ports.repositories import (
     IncompatibleSnapshotError,
     StoredAnalysisRun,
@@ -44,7 +48,11 @@ CSRF_TOKEN = "test-csrf"
 
 
 def snapshot(
-    *, complete: bool = True, source_errors: tuple[SourceError, ...] = ()
+    *,
+    complete: bool = True,
+    source_errors: tuple[SourceError, ...] = (),
+    candidate_sha: str | None = None,
+    checks: tuple[GitHubCheck, ...] = (),
 ) -> ReleaseSnapshot:
     return ReleaseSnapshot(
         release_name="Milestone 7",
@@ -67,7 +75,8 @@ def snapshot(
         complete=complete,
         source_errors=source_errors,
         candidate_ref="release/2026-08-10",
-        candidate_sha="candidate-sha" if complete else "",
+        candidate_sha=(candidate_sha or "candidate-sha") if complete else "",
+        checks=checks,
     )
 
 
@@ -145,8 +154,37 @@ class MemoryAnalysisRepository:
             raise KeyError(run_id) from None
 
 
+class FakePolicyStore:
+    def __init__(
+        self, record: PolicyRecord | None, *, failure: bool = False
+    ) -> None:
+        self.record = record
+        self.failure = failure
+        self.requested_repository_ids: list[str] = []
+
+    async def get_latest(self, repository_id: str) -> PolicyRecord | None:
+        self.requested_repository_ids.append(repository_id)
+        if self.failure:
+            raise PolicyPersistenceError() from RuntimeError(
+                "postgresql://user:secret-password@database"
+            )
+        return self.record
+
+    async def create_version(
+        self,
+        *,
+        repository_id: str,
+        policy: ReleasePolicy,
+        expected_version: int | None,
+    ) -> PolicyRecord:
+        del repository_id, policy, expected_version
+        raise AssertionError("analysis must not create policy versions")
+
+
 def service(
-    loader: FakeLoader, repository: MemoryAnalysisRepository
+    loader: FakeLoader,
+    repository: MemoryAnalysisRepository,
+    policy_repository: FakePolicyStore | None = None,
 ) -> AnalysisService:
     async def loader_factory(request: AnalysisRequest) -> FakeLoader:
         del request
@@ -155,6 +193,7 @@ def service(
     return AnalysisService(
         loader_factory=loader_factory,
         repository=repository,
+        policy_repository=policy_repository,
         clock=lambda: NOW,
     )
 
@@ -207,6 +246,62 @@ async def test_post_analysis_returns_persisted_run_and_get_retrieves_it(
     assert retrieved.json()["snapshot"]["candidate_sha"] == "candidate-sha"
     assert loader.requests[0].repository.owner == "example"
     assert loader.requests[0].installation_id == 123
+
+
+async def test_analysis_uses_current_configured_policy_for_decision_eligible_run() -> (
+    None
+):
+    candidate_sha = "a" * 40
+    check = GitHubCheck(
+        source_id="201",
+        run_id=201,
+        name="security",
+        url="https://github.com/example/release-intelligence/runs/201",
+        head_sha=candidate_sha,
+        status="completed",
+        conclusion="failure",
+        started_at=NOW,
+        completed_at=NOW,
+    )
+    policy = ReleasePolicy(
+        main_branch="main",
+        candidate_branch="release/2026-08-10",
+        milestone_number=7,
+        code_change_label="code-change",
+        release_ops_label="release-ops",
+        blocker_label="release-blocker",
+        check_categories={"security": CheckCategory.ADVISORY},
+    )
+    policy_store = FakePolicyStore(
+        PolicyRecord(
+            repository_id=REPOSITORY_ID,
+            version=4,
+            policy=policy,
+            created_at=NOW,
+        )
+    )
+    loader = FakeLoader(snapshot(candidate_sha=candidate_sha, checks=(check,)))
+    repository = MemoryAnalysisRepository()
+
+    analysis_service = service(loader, repository, policy_store)
+    run_id = await analysis_service.run(
+        AnalysisRequest(
+            repository_id=REPOSITORY_ID,
+            repository=RepoRef(owner="example", name="release-intelligence"),
+            installation_id=123,
+            milestone_number=7,
+            candidate_ref="release/2026-08-10",
+        ),
+        actor="github:7",
+    )
+
+    stored = repository.runs[run_id]
+    assert policy_store.requested_repository_ids == [REPOSITORY_ID]
+    assert stored.policy_version == "configuration:4"
+    assert stored.assessment.status.value == "NEEDS_DECISION"
+    assert [finding.rule_id for finding in stored.findings] == [
+        "checks.advisory_requires_decision"
+    ]
 
 
 async def test_partial_and_rate_limited_snapshots_are_persisted_insufficient(
@@ -321,6 +416,28 @@ async def test_database_error_http_mapping_returns_503(
     assert response.status_code == 503
     assert response.json() == {"detail": "Analysis persistence unavailable"}
     assert repository.write_failed is True
+
+
+async def test_policy_database_error_http_mapping_is_sanitized_503(
+    store: FakeAuthStore,
+) -> None:
+    policy_repository = FakePolicyStore(None, failure=True)
+    async with await request_client(
+        service(FakeLoader(snapshot()), MemoryAnalysisRepository(), policy_repository),
+        store,
+    ) as client:
+        response = await client.post(
+            "/api/analyses",
+            json={
+                "repository_id": REPOSITORY_ID,
+                "milestone_number": 7,
+                "candidate_ref": "release/2026-08-10",
+            },
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Analysis persistence unavailable"}
+    assert "secret-password" not in response.text
 
 
 @pytest.mark.parametrize(

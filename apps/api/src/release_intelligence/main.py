@@ -171,6 +171,11 @@ def create_app(
                     clock=effective_clock,
                 )
                 application.state.github_app_token_provider = token_provider
+                if configured_policy_store is None:
+                    owned_policy_repository = policy_repository_factory(
+                        configuration.database_url.get_secret_value()
+                    )
+                    configured_policy_store = owned_policy_repository
                 if configured_analysis_service is None:
                     owned_analysis_repository = analysis_repository_factory(
                         configuration.database_url.get_secret_value(),
@@ -192,6 +197,7 @@ def create_app(
                     configured_analysis_service = AnalysisService(
                         loader_factory=loader_factory,
                         repository=owned_analysis_repository,
+                        policy_repository=configured_policy_store,
                         clock=effective_clock,
                     )
                 if configured_decision_service is None and owned_analysis_repository:
@@ -199,11 +205,6 @@ def create_app(
                         clock=effective_clock,
                         store=cast(DecisionStore, owned_analysis_repository),
                     )
-                if configured_policy_store is None:
-                    owned_policy_repository = policy_repository_factory(
-                        configuration.database_url.get_secret_value()
-                    )
-                    configured_policy_store = owned_policy_repository
             application.state.auth_store = store
             application.state.oauth_gateway = gateway
             application.state.credential_cipher = credential_cipher

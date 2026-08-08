@@ -340,11 +340,11 @@ class HumanDecisionRow(Base):
         ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False
     )
     finding_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("readiness_findings.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("readiness_findings.id", ondelete="CASCADE"), nullable=True
     )
     fingerprint: Mapped[str] = mapped_column(String(255), nullable=False)
     supersedes_decision_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("human_decisions.id", ondelete="RESTRICT"), nullable=True
+        ForeignKey("human_decisions.id", ondelete="CASCADE"), nullable=True
     )
     decision: Mapped[str] = mapped_column(String(32), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
