@@ -150,16 +150,22 @@ def comparison(
     url: str | None = None,
 ) -> PullRequestComparison:
     effective_base = base_sha or BASE_SHA
-    effective_merge_base = merge_base_sha or effective_base
-    effective_ahead = (2 if status == "ahead" else 0) if ahead_by is None else ahead_by
+    default_merge_base = {
+        "ahead": effective_base,
+        "behind": head_sha,
+        "diverged": "1" * 40,
+        "identical": effective_base,
+    }.get(status, effective_base)
+    effective_merge_base = merge_base_sha or default_merge_base
+    effective_ahead = (
+        (2 if status in {"ahead", "diverged"} else 0) if ahead_by is None else ahead_by
+    )
     effective_behind = (
         (0 if status in {"ahead", "identical"} else 1)
         if behind_by is None
         else behind_by
     )
-    effective_total = (
-        (2 if status == "ahead" else 0) if total_commits is None else total_commits
-    )
+    effective_total = effective_ahead if total_commits is None else total_commits
     effective_commits = (
         (
             (
@@ -174,7 +180,7 @@ def comparison(
                     committed_at=NOW - timedelta(days=1),
                 ),
             )
-            if status == "ahead"
+            if status in {"ahead", "diverged"}
             else ()
         )
         if commits is None
@@ -337,7 +343,7 @@ def test_one_fully_valid_linked_pr_satisfies_the_issue() -> None:
             pull(143),
         ),
         comparisons=(
-            comparison(144, status="behind", merge_base_sha="1" * 40),
+            comparison(144, status="behind"),
             comparison(143),
         ),
     )
@@ -549,13 +555,9 @@ def test_milestone_finding_fingerprints_the_pr_item_evidence() -> None:
     "corrupt_comparisons",
     [
         (),
-        (comparison(143, base_sha="5" * 40),),
         (
             comparison(143),
-            replace(
-                comparison(143),
-                comparison=replace(comparison(143).comparison, status="behind"),
-            ),
+            comparison(143, status="behind"),
         ),
     ],
 )
@@ -569,17 +571,23 @@ def test_missing_or_ambiguous_comparison_does_not_fail_open(
     )
 
 
+def test_comparison_for_wrong_pr_base_is_insufficient_evidence() -> None:
+    with pytest.raises(ScopeEvidenceError) as raised:
+        evaluate_scope(
+            snapshot(comparisons=(comparison(143, base_sha="5" * 40),)), POLICY
+        )
+
+    assert raised.value.findings == ()
+    assert raised.value.codes == ("comparison.invalid_identity:143",)
+
+
 def test_candidate_finding_fingerprints_the_comparison_evidence() -> None:
     behind = evaluate_scope(
-        snapshot(
-            comparisons=(comparison(143, status="behind", merge_base_sha="1" * 40),)
-        ),
+        snapshot(comparisons=(comparison(143, status="behind"),)),
         POLICY,
     )[0]
     diverged = evaluate_scope(
-        snapshot(
-            comparisons=(comparison(143, status="diverged", merge_base_sha="1" * 40),)
-        ),
+        snapshot(comparisons=(comparison(143, status="diverged"),)),
         POLICY,
     )[0]
 
@@ -589,9 +597,7 @@ def test_candidate_finding_fingerprints_the_comparison_evidence() -> None:
 
 
 def test_duplicate_comparison_evidence_is_idempotent() -> None:
-    invalid = comparison(
-        status="behind", merge_base_sha="1" * 40, head_sha=CANDIDATE_SHA
-    )
+    invalid = comparison(status="behind", head_sha=CANDIDATE_SHA)
     once = evaluate_scope(snapshot(comparisons=(invalid,)), POLICY)
     duplicated = evaluate_scope(snapshot(comparisons=(invalid, invalid)), POLICY)
 
@@ -723,11 +729,11 @@ def test_ahead_comparison_requires_head_once_in_complete_commit_set() -> None:
         )
     )
 
-    findings = evaluate_scope(snapshot(comparisons=(missing_head,)), POLICY)
+    with pytest.raises(ScopeEvidenceError) as raised:
+        evaluate_scope(snapshot(comparisons=(missing_head,)), POLICY)
 
-    assert tuple(finding.rule_id for finding in findings) == (
-        "scope.change_requires_candidate_inclusion",
-    )
+    assert raised.value.findings == ()
+    assert raised.value.codes == ("comparison.invalid_matrix:143",)
 
 
 @pytest.mark.parametrize(
@@ -768,6 +774,9 @@ def test_ahead_comparison_requires_head_once_in_complete_commit_set() -> None:
             )
         ),
         comparison(merge_base_sha="6" * 40),
+        comparison(status="behind", merge_base_sha=BASE_SHA),
+        comparison(status="diverged", merge_base_sha=BASE_SHA),
+        comparison(status="diverged", merge_base_sha=CANDIDATE_SHA),
         comparison(
             commits=(
                 GitHubCommit(
@@ -783,6 +792,7 @@ def test_ahead_comparison_requires_head_once_in_complete_commit_set() -> None:
             )
         ),
         comparison(status="diverged", behind_by=0),
+        comparison(status="unknown"),
         comparison(
             status="identical",
             base_sha=CANDIDATE_SHA,
@@ -800,7 +810,7 @@ def test_ahead_comparison_requires_head_once_in_complete_commit_set() -> None:
         ),
     ],
 )
-def test_comparison_matrix_fails_closed(
+def test_invalid_comparison_matrix_is_insufficient_evidence(
     invalid_comparison: PullRequestComparison,
 ) -> None:
     release = snapshot(
@@ -816,11 +826,42 @@ def test_comparison_matrix_fails_closed(
         comparisons=(invalid_comparison,),
     )
 
-    findings = evaluate_scope(release, POLICY)
+    with pytest.raises(ScopeEvidenceError) as raised:
+        evaluate_scope(release, POLICY)
+
+    assert raised.value.findings == ()
+    assert raised.value.codes == (
+        f"comparison.invalid_matrix:{invalid_comparison.pull_request_number}",
+    )
+
+
+@pytest.mark.parametrize("status", ["behind", "diverged"])
+def test_coherent_non_inclusion_matrix_is_a_candidate_blocker(status: str) -> None:
+    findings = evaluate_scope(
+        snapshot(comparisons=(comparison(status=status),)), POLICY
+    )
 
     assert tuple(finding.rule_id for finding in findings) == (
         "scope.change_requires_candidate_inclusion",
     )
+
+
+def test_invalid_matrix_preserves_unrelated_proven_findings() -> None:
+    release = snapshot(
+        items=(issue(142), issue(145), pull_item(146)),
+        links=(link(145, 146),),
+        pulls=(pull(146),),
+        comparisons=(comparison(146, ahead_by=-1),),
+    )
+
+    with pytest.raises(ScopeEvidenceError) as raised:
+        evaluate_scope(release, POLICY)
+
+    assert [
+        (finding.rule_id, finding.evidence[0].source_id)
+        for finding in raised.value.findings
+    ] == [("scope.code_change_requires_pr", "1420")]
+    assert raised.value.codes == ("comparison.invalid_matrix:146",)
 
 
 def test_closed_and_foreign_milestone_issues_are_outside_scope() -> None:

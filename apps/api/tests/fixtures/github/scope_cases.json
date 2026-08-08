@@ -28,7 +28,6 @@
     {
       "name": "change_missing_from_candidate",
       "comparison_status": "behind",
-      "comparison_merge_base_sha": "1111111111111111111111111111111111111111",
       "expected_rules": ["scope.change_requires_candidate_inclusion"]
     },
     {

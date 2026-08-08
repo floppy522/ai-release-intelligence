@@ -282,6 +282,7 @@ def _analyze_evidence(snapshot: ReleaseSnapshot) -> _EvidenceState:
         and item.milestone_number == snapshot.milestone_number
     }
     pull_numbers = {pull.number for pull in snapshot.pull_requests}
+    unique_pulls = _unique_pulls(snapshot.pull_requests)
     linked_issues_by_pull: defaultdict[int, set[int]] = defaultdict(set)
     for release_link in snapshot.links:
         if release_link.issue_number in current_issue_numbers:
@@ -330,8 +331,13 @@ def _analyze_evidence(snapshot: ReleaseSnapshot) -> _EvidenceState:
             invalid_pr_issues.update(linked_issues_by_pull[pull_record.number])
     for relation in snapshot.comparisons:
         comparison = relation.comparison
+        related_pull = unique_pulls.get(relation.pull_request_number)
         if (
             relation.pull_request_number not in pull_numbers
+            or (
+                related_pull is not None
+                and comparison.base_sha != related_pull.merge_commit_sha
+            )
             or not _is_sha(comparison.base_sha)
             or not _is_sha(comparison.merge_base_sha)
             or not _is_sha(comparison.head_sha)
@@ -349,6 +355,11 @@ def _analyze_evidence(snapshot: ReleaseSnapshot) -> _EvidenceState:
             )
         ):
             codes.append(f"comparison.invalid_identity:{relation.pull_request_number}")
+            invalid_comparison_issues.update(
+                linked_issues_by_pull[relation.pull_request_number]
+            )
+        elif not _is_coherent_comparison_matrix(comparison):
+            codes.append(f"comparison.invalid_matrix:{relation.pull_request_number}")
             invalid_comparison_issues.update(
                 linked_issues_by_pull[relation.pull_request_number]
             )
@@ -493,62 +504,86 @@ def _is_valid_comparison(
     merge_commit_sha: str,
     comparison: CommitComparison,
 ) -> bool:
-    counts = (
-        comparison.ahead_by,
-        comparison.behind_by,
-        comparison.total_commits,
-    )
     if (
         not _is_sha(merge_commit_sha)
         or not _is_sha(comparison.base_sha)
         or not _is_sha(comparison.merge_base_sha)
         or not _is_sha(comparison.head_sha)
         or comparison.base_sha != merge_commit_sha
-        or comparison.merge_base_sha != comparison.base_sha
         or comparison.head_sha != snapshot.candidate_sha
-        or any(
-            isinstance(count, bool) or not isinstance(count, int) or count < 0
-            for count in counts
-        )
         or not _is_comparison_url(
             comparison.url,
             snapshot.repository_full_name,
             comparison.base_sha,
             comparison.head_sha,
         )
+        or not _is_coherent_comparison_matrix(comparison)
     ):
         return False
-    if comparison.status == "identical":
-        return (
-            comparison.base_sha == comparison.head_sha
-            and comparison.ahead_by == 0
-            and comparison.behind_by == 0
-            and comparison.total_commits == 0
-            and not comparison.commits
-        )
-    if comparison.status != "ahead":
-        return False
-    commits = comparison.commits
-    if (
-        comparison.behind_by != 0
-        or comparison.ahead_by <= 0
-        or comparison.total_commits != comparison.ahead_by
-        or comparison.total_commits != len(commits)
-        or not commits
-        or sum(commit.sha == comparison.head_sha for commit in commits) != 1
-        or len({commit.sha for commit in commits}) != len(commits)
-    ):
-        return False
-    return all(
-        _is_sha(commit.sha)
-        and commit.committed_at.tzinfo is not None
-        and _is_commit_url(
-            commit.url,
-            snapshot.repository_full_name,
-            commit.sha,
-        )
-        for commit in commits
+    return comparison.status in {"identical", "ahead"}
+
+
+def _is_coherent_comparison_matrix(comparison: CommitComparison) -> bool:
+    counts = (
+        comparison.ahead_by,
+        comparison.behind_by,
+        comparison.total_commits,
     )
+    if any(
+        isinstance(count, bool) or not isinstance(count, int) or count < 0
+        for count in counts
+    ):
+        return False
+
+    commits = comparison.commits
+    if any(
+        not isinstance(commit.committed_at, datetime)
+        or commit.committed_at.tzinfo is None
+        for commit in commits
+    ):
+        return False
+    if len({commit.sha for commit in commits}) != len(commits):
+        return False
+
+    status = comparison.status
+    base = comparison.base_sha
+    head = comparison.head_sha
+    merge_base = comparison.merge_base_sha
+    ahead = comparison.ahead_by
+    behind = comparison.behind_by
+    total = comparison.total_commits
+
+    if status == "identical":
+        return (
+            ahead == 0
+            and behind == 0
+            and total == 0
+            and not commits
+            and base == head == merge_base
+        )
+    if status == "behind":
+        return (
+            ahead == 0
+            and behind > 0
+            and total == 0
+            and not commits
+            and base != head
+            and merge_base == head
+        )
+    if status not in {"ahead", "diverged"}:
+        return False
+    if (
+        ahead <= 0
+        or total != ahead
+        or total != len(commits)
+        or not commits
+        or base == head
+        or sum(commit.sha == head for commit in commits) != 1
+    ):
+        return False
+    if status == "ahead":
+        return behind == 0 and merge_base == base
+    return behind > 0 and merge_base not in {base, head}
 
 
 def _unique_items(
