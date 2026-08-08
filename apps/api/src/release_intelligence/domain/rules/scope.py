@@ -5,7 +5,7 @@ import json
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -29,29 +29,82 @@ _REPOSITORY_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
+class ScopeEvidenceError(Exception):
+    """Signal insufficient scope evidence while preserving proven findings.
+
+    Callers must give this error precedence over a clean readiness result and may
+    still surface ``findings`` as independently proven business blockers.  Codes
+    contain only stable source coordinates, never untrusted evidence values.
+    """
+
+    def __init__(
+        self,
+        *,
+        findings: tuple[ReadinessFinding, ...],
+        codes: Iterable[str],
+    ) -> None:
+        super().__init__("Scope evidence is incomplete")
+        self.findings = findings
+        self.codes = tuple(sorted(set(codes)))
+
+
+@dataclass(frozen=True)
+class _EvidenceState:
+    codes: tuple[str, ...]
+    invalid_issue_numbers: frozenset[int]
+    invalid_link_issue_numbers: frozenset[int]
+    invalid_pr_issue_numbers: frozenset[int]
+    invalid_comparison_issue_numbers: frozenset[int]
+
+
 def evaluate_scope(
     snapshot: ReleaseSnapshot, policy: ReleasePolicy
 ) -> tuple[ReadinessFinding, ...]:
-    """Evaluate milestone membership as an ordered set of existential PR chains."""
-    if not _has_valid_prerequisites(snapshot, policy):
-        return ()
-    issues = _issue_records(snapshot.items, snapshot.milestone_number)
-    typed_issues = _unambiguously_typed_issues(
-        issues, policy, snapshot.repository_full_name
-    )
+    """Evaluate milestone membership as an ordered set of existential PR chains.
+
+    Invalid source identity raises :class:`ScopeEvidenceError`; its ``findings``
+    are the blockers proven without relying on quarantined evidence chains.
+    """
+    prerequisite_errors = _prerequisite_error_codes(snapshot, policy)
+    if prerequisite_errors:
+        raise ScopeEvidenceError(findings=(), codes=prerequisite_errors)
+
+    evidence = _analyze_evidence(snapshot)
+    issues = {
+        number: records
+        for number, records in _issue_records(
+            snapshot.items, snapshot.milestone_number
+        ).items()
+        if number not in evidence.invalid_issue_numbers
+    }
+    typed_issues = _unambiguously_typed_issues(issues, policy)
     code_change_issues = tuple(
         item
         for item in typed_issues
         if policy.code_change_label.lower() in _normalized_labels(item.labels)
     )
+    link_safe_issues = _without_issues(
+        code_change_issues, evidence.invalid_link_issue_numbers
+    )
+    pr_safe_issues = _without_issues(
+        link_safe_issues, evidence.invalid_pr_issue_numbers
+    )
+    candidate_safe_issues = _without_issues(
+        pr_safe_issues, evidence.invalid_comparison_issue_numbers
+    )
 
     findings: list[ReadinessFinding] = []
     findings.extend(_evaluate_type_labels(snapshot, policy, issues))
-    findings.extend(_evaluate_pr_links(snapshot, code_change_issues))
-    findings.extend(_evaluate_pr_milestones(snapshot, policy, code_change_issues))
-    findings.extend(_evaluate_main_merge(snapshot, policy, code_change_issues))
-    findings.extend(_evaluate_candidate_inclusion(snapshot, policy, code_change_issues))
-    return tuple(findings)
+    findings.extend(_evaluate_pr_links(snapshot, link_safe_issues))
+    findings.extend(_evaluate_pr_milestones(snapshot, policy, pr_safe_issues))
+    findings.extend(_evaluate_main_merge(snapshot, policy, pr_safe_issues))
+    findings.extend(
+        _evaluate_candidate_inclusion(snapshot, policy, candidate_safe_issues)
+    )
+    result = tuple(findings)
+    if evidence.codes:
+        raise ScopeEvidenceError(findings=result, codes=evidence.codes)
+    return result
 
 
 def _evaluate_type_labels(
@@ -67,16 +120,7 @@ def _evaluate_type_labels(
     for number, records in issues.items():
         item = records[0]
         type_labels = _normalized_labels(item.labels).intersection(supported)
-        if (
-            len(records) != 1
-            or len(type_labels) != 1
-            or not _is_direct_url(
-                item.url,
-                snapshot.repository_full_name,
-                "issues",
-                item.number,
-            )
-        ):
+        if len(records) != 1 or len(type_labels) != 1:
             findings.append(
                 _finding(
                     "scope.exactly_one_type",
@@ -189,58 +233,101 @@ def _evaluate_candidate_inclusion(
     return tuple(findings)
 
 
-def _has_valid_prerequisites(snapshot: ReleaseSnapshot, policy: ReleasePolicy) -> bool:
+def _prerequisite_error_codes(
+    snapshot: ReleaseSnapshot, policy: ReleasePolicy
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    if snapshot.snapshot_version is not SnapshotVersion.GITHUB_V1:
+        errors.append("snapshot.invalid_version")
+    if not snapshot.complete:
+        errors.append("snapshot.incomplete")
+    if snapshot.source_errors:
+        errors.append("snapshot.source_errors")
     if (
-        snapshot.snapshot_version is not SnapshotVersion.GITHUB_V1
-        or not snapshot.complete
-        or snapshot.source_errors
-        or snapshot.milestone_number != policy.milestone_number
+        snapshot.milestone_number != policy.milestone_number
         or snapshot.candidate_ref != policy.candidate_branch
-        or not isinstance(snapshot.repository_id, str)
+    ):
+        errors.append("snapshot.policy_mismatch")
+    if (
+        not isinstance(snapshot.repository_id, str)
         or not snapshot.repository_id.strip()
         or not _is_repository_name(snapshot.repository_full_name)
-        or not _is_sha(snapshot.candidate_sha)
-        or not _has_valid_evidence_identity(snapshot)
     ):
-        return False
+        errors.append("snapshot.invalid_repository")
+    if not _is_sha(snapshot.candidate_sha):
+        errors.append("snapshot.invalid_candidate")
     started_at = snapshot.fetch_started_at
     fetched_at = snapshot.fetched_at
-    return (
+    if not (
         isinstance(started_at, datetime)
         and isinstance(fetched_at, datetime)
         and started_at.tzinfo is not None
         and fetched_at.tzinfo is not None
         and started_at <= fetched_at
-    )
+    ):
+        errors.append("snapshot.invalid_timestamps")
+    return tuple(sorted(set(errors)))
 
 
-def _has_valid_evidence_identity(snapshot: ReleaseSnapshot) -> bool:
+def _analyze_evidence(snapshot: ReleaseSnapshot) -> _EvidenceState:
     repository = snapshot.repository_full_name
-    issue_numbers = {
+    all_issue_numbers = {
         item.number for item in snapshot.items if item.kind is GitHubItemKind.ISSUE
     }
+    current_issue_numbers = {
+        item.number
+        for item in snapshot.items
+        if item.kind is GitHubItemKind.ISSUE
+        and item.state.lower() == "open"
+        and item.milestone_number == snapshot.milestone_number
+    }
     pull_numbers = {pull.number for pull in snapshot.pull_requests}
+    linked_issues_by_pull: defaultdict[int, set[int]] = defaultdict(set)
+    for release_link in snapshot.links:
+        if release_link.issue_number in current_issue_numbers:
+            linked_issues_by_pull[release_link.pull_request_number].add(
+                release_link.issue_number
+            )
+
+    codes: list[str] = []
+    invalid_issues: set[int] = set()
+    invalid_link_issues: set[int] = set()
+    invalid_pr_issues: set[int] = set()
+    invalid_comparison_issues: set[int] = set()
     for item in snapshot.items:
         if item.kind is GitHubItemKind.PULL_REQUEST:
             if not _is_direct_url(item.url, repository, "pull", item.number):
-                return False
+                codes.append(f"pull_item.invalid_url:{item.number}")
+                invalid_pr_issues.update(linked_issues_by_pull[item.number])
         elif (
             item.state.lower() == "open"
             and item.milestone_number == snapshot.milestone_number
             and not _is_direct_url(item.url, repository, "issues", item.number)
         ):
-            return False
-    if any(
-        link.issue_number not in issue_numbers
-        or not _is_direct_url(link.url, repository, "pull", link.pull_request_number)
-        for link in snapshot.links
-    ):
-        return False
-    if any(
-        not _is_direct_url(pull.url, repository, "pull", pull.number)
-        for pull in snapshot.pull_requests
-    ):
-        return False
+            codes.append(f"issue.invalid_url:{item.number}")
+            invalid_issues.add(item.number)
+    for release_link in snapshot.links:
+        if release_link.issue_number not in all_issue_numbers:
+            codes.append(
+                "link.invalid_issue:"
+                f"{release_link.issue_number}:{release_link.pull_request_number}"
+            )
+            invalid_link_issues.add(release_link.issue_number)
+        if not _is_direct_url(
+            release_link.url,
+            repository,
+            "pull",
+            release_link.pull_request_number,
+        ):
+            codes.append(
+                "link.invalid_url:"
+                f"{release_link.issue_number}:{release_link.pull_request_number}"
+            )
+            invalid_link_issues.add(release_link.issue_number)
+    for pull_record in snapshot.pull_requests:
+        if not _is_direct_url(pull_record.url, repository, "pull", pull_record.number):
+            codes.append(f"pull.invalid_url:{pull_record.number}")
+            invalid_pr_issues.update(linked_issues_by_pull[pull_record.number])
     for relation in snapshot.comparisons:
         comparison = relation.comparison
         if (
@@ -261,8 +348,23 @@ def _has_valid_evidence_identity(snapshot: ReleaseSnapshot) -> bool:
                 for commit in comparison.commits
             )
         ):
-            return False
-    return True
+            codes.append(f"comparison.invalid_identity:{relation.pull_request_number}")
+            invalid_comparison_issues.update(
+                linked_issues_by_pull[relation.pull_request_number]
+            )
+    return _EvidenceState(
+        codes=tuple(sorted(set(codes))),
+        invalid_issue_numbers=frozenset(invalid_issues),
+        invalid_link_issue_numbers=frozenset(invalid_link_issues),
+        invalid_pr_issue_numbers=frozenset(invalid_pr_issues),
+        invalid_comparison_issue_numbers=frozenset(invalid_comparison_issues),
+    )
+
+
+def _without_issues(
+    issues: tuple[GitHubItem, ...], excluded: frozenset[int]
+) -> tuple[GitHubItem, ...]:
+    return tuple(item for item in issues if item.number not in excluded)
 
 
 def _issue_records(
@@ -288,7 +390,6 @@ def _issue_records(
 def _unambiguously_typed_issues(
     issues: dict[int, tuple[GitHubItem, ...]],
     policy: ReleasePolicy,
-    repository: str,
 ) -> tuple[GitHubItem, ...]:
     supported = {
         policy.code_change_label.lower(),
@@ -299,12 +400,6 @@ def _unambiguously_typed_issues(
         for records in issues.values()
         if len(records) == 1
         and len(_normalized_labels(records[0].labels).intersection(supported)) == 1
-        and _is_direct_url(
-            records[0].url,
-            repository,
-            "issues",
-            records[0].number,
-        )
     )
 
 

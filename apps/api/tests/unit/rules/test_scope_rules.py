@@ -20,7 +20,7 @@ from release_intelligence.domain.models import (
     SourceError,
 )
 from release_intelligence.domain.policy import ReleasePolicy
-from release_intelligence.domain.rules.scope import evaluate_scope
+from release_intelligence.domain.rules.scope import ScopeEvidenceError, evaluate_scope
 from release_intelligence.ports.github import (
     CommitComparison,
     GitHubCommit,
@@ -649,7 +649,10 @@ def test_duplicate_comparison_evidence_is_idempotent() -> None:
 def test_invalid_candidate_evidence_identity_is_not_a_business_blocker(
     corrupt,
 ) -> None:
-    assert evaluate_scope(corrupt(snapshot()), POLICY) == ()
+    with pytest.raises(ScopeEvidenceError) as raised:
+        evaluate_scope(corrupt(snapshot()), POLICY)
+
+    assert raised.value.findings == ()
 
 
 def test_comparison_url_must_bind_exact_base_and_head_shas() -> None:
@@ -668,7 +671,10 @@ def test_comparison_url_must_bind_exact_base_and_head_shas() -> None:
         ),
     )
 
-    assert evaluate_scope(release, POLICY) == ()
+    with pytest.raises(ScopeEvidenceError) as raised:
+        evaluate_scope(release, POLICY)
+
+    assert raised.value.findings == ()
 
 
 def test_identical_comparison_is_valid_only_for_the_candidate_commit() -> None:
@@ -877,7 +883,10 @@ def test_foreign_duplicate_does_not_make_current_issue_ambiguous() -> None:
 def test_invalid_snapshot_prerequisites_do_not_infer_absence_findings(corrupt) -> None:
     missing_pr = snapshot(items=(issue(),), links=(), pulls=(), comparisons=())
 
-    assert evaluate_scope(corrupt(missing_pr), POLICY) == ()
+    with pytest.raises(ScopeEvidenceError) as raised:
+        evaluate_scope(corrupt(missing_pr), POLICY)
+
+    assert raised.value.findings == ()
 
 
 MALFORMED_URLS = [
@@ -904,7 +913,10 @@ MALFORMED_URLS = [
 def test_malformed_evidence_urls_never_crash_or_pass(
     malformed_url: str, corrupt
 ) -> None:
-    assert evaluate_scope(corrupt(snapshot(), malformed_url), POLICY) == ()
+    with pytest.raises(ScopeEvidenceError) as raised:
+        evaluate_scope(corrupt(snapshot(), malformed_url), POLICY)
+
+    assert raised.value.findings == ()
 
 
 @pytest.mark.parametrize(
@@ -919,7 +931,10 @@ def test_invalid_repository_identity_never_synthesizes_evidence(
         repository_full_name=repository,
     )
 
-    assert evaluate_scope(missing_pr, POLICY) == ()
+    with pytest.raises(ScopeEvidenceError) as raised:
+        evaluate_scope(missing_pr, POLICY)
+
+    assert raised.value.findings == ()
 
 
 def test_legacy_comparison_without_head_identity_is_not_a_candidate_blocker() -> None:
@@ -934,7 +949,97 @@ def test_legacy_comparison_without_head_identity_is_not_a_candidate_blocker() ->
     restored = AnalysisRepository._snapshot_from_payload(payload)
 
     assert restored.comparisons[0].comparison.head_sha == ""
-    assert evaluate_scope(restored, POLICY) == ()
+    with pytest.raises(ScopeEvidenceError) as raised:
+        evaluate_scope(restored, POLICY)
+
+    assert raised.value.findings == ()
+
+
+def test_unrelated_invalid_pr_item_preserves_proven_missing_pr_finding() -> None:
+    release = snapshot(
+        items=(
+            issue(141),
+            pull_item(999, url="https://github.com/attacker/repo/pull/999"),
+        ),
+        links=(),
+        pulls=(),
+        comparisons=(),
+    )
+
+    with pytest.raises(ScopeEvidenceError) as raised:
+        evaluate_scope(release, POLICY)
+
+    assert [
+        (finding.rule_id, finding.evidence[0].source_id)
+        for finding in raised.value.findings
+    ] == [("scope.code_change_requires_pr", "1410")]
+    assert raised.value.codes == ("pull_item.invalid_url:999",)
+
+
+def test_unrelated_legacy_comparison_preserves_proven_type_finding() -> None:
+    legacy = comparison(999)
+    release = snapshot(
+        items=(issue(141, labels=()), pull_item(999)),
+        links=(),
+        pulls=(pull(999),),
+        comparisons=(
+            replace(legacy, comparison=replace(legacy.comparison, head_sha="")),
+        ),
+    )
+
+    with pytest.raises(ScopeEvidenceError) as raised:
+        evaluate_scope(release, POLICY)
+
+    assert [
+        (finding.rule_id, finding.evidence[0].source_id)
+        for finding in raised.value.findings
+    ] == [("scope.exactly_one_type", "1410")]
+    assert raised.value.codes == ("comparison.invalid_identity:999",)
+
+
+def test_invalid_related_link_does_not_become_a_missing_pr_action() -> None:
+    release = snapshot(
+        links=(link(url="https://github.com/attacker/repo/pull/143"),),
+    )
+
+    with pytest.raises(ScopeEvidenceError) as raised:
+        evaluate_scope(release, POLICY)
+
+    assert raised.value.findings == ()
+    assert raised.value.codes == ("link.invalid_url:142:143",)
+
+
+def test_mixed_invalid_evidence_is_quarantined_deterministically() -> None:
+    release = snapshot(
+        items=(
+            issue(145),
+            issue(142),
+            issue(141, labels=()),
+            pull_item(146),
+            pull_item(999, url="https://github.com/attacker/repo/pull/999"),
+        ),
+        links=(link(145, 146, url="https://github.com/attacker/repo/pull/146"),),
+        pulls=(pull(146),),
+        comparisons=(comparison(146),),
+    )
+
+    expected_findings = [
+        ("scope.exactly_one_type", "1410"),
+        ("scope.code_change_requires_pr", "1420"),
+    ]
+    expected_codes = (
+        "link.invalid_url:145:146",
+        "pull_item.invalid_url:999",
+    )
+    for candidate in (release, replace(release, items=tuple(reversed(release.items)))):
+        with pytest.raises(ScopeEvidenceError) as raised:
+            evaluate_scope(candidate, POLICY)
+
+        assert [
+            (finding.rule_id, finding.evidence[0].source_id)
+            for finding in raised.value.findings
+        ] == expected_findings
+        assert raised.value.codes == expected_codes
 
 
 def test_duplicate_supported_label_is_one_logical_type() -> None:
