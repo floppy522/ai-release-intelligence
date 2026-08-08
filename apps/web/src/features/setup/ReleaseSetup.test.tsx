@@ -33,6 +33,29 @@ it("requires labels, candidate branch, and a category for each check", async () 
     await screen.findByText("Classify every discovered check"),
   ).toBeInTheDocument();
   expect(screen.getByText("Enter the required release fields")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("api category"), {
+    target: { value: "BLOCKING" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+  expect(screen.getByLabelText("api category")).toHaveAttribute(
+    "aria-invalid",
+    "false",
+  );
+  expect(screen.getByLabelText("api category")).not.toHaveAttribute(
+    "aria-describedby",
+  );
+  expect(screen.getByLabelText("security category")).toHaveAttribute(
+    "aria-invalid",
+    "true",
+  );
+  expect(screen.getByLabelText("security category")).toHaveAttribute(
+    "aria-describedby",
+    "checks-error",
+  );
+  expect(screen.getByLabelText("Candidate branch")).toHaveAttribute(
+    "aria-describedby",
+    "required-error",
+  );
   expect(putReleasePolicy).not.toHaveBeenCalled();
 });
 

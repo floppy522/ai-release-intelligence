@@ -273,7 +273,7 @@ function PolicyForm({
           value={milestoneNumber}
           onChange={(event) => setMilestoneNumber(event.target.value)}
           aria-invalid={invalidFields.has("milestone")}
-          aria-describedby={invalidFields.has("milestone") ? "policy-error" : undefined}
+          aria-describedby={invalidFields.has("milestone") ? "required-error" : undefined}
         />
       </label>
       <label>
@@ -282,7 +282,7 @@ function PolicyForm({
           value={mainBranch}
           onChange={(event) => setMainBranch(event.target.value)}
           aria-invalid={invalidFields.has("main")}
-          aria-describedby={invalidFields.has("main") ? "policy-error" : undefined}
+          aria-describedby={invalidFields.has("main") ? "required-error" : undefined}
         />
       </label>
       <label>
@@ -292,7 +292,7 @@ function PolicyForm({
           value={candidateBranch}
           onChange={(event) => setCandidateBranch(event.target.value)}
           aria-invalid={invalidFields.has("candidate")}
-          aria-describedby={invalidFields.has("candidate") ? "policy-error" : undefined}
+          aria-describedby={invalidFields.has("candidate") ? (requiredError ? "required-error" : "field-error") : undefined}
         />
       </label>
 
@@ -304,7 +304,7 @@ function PolicyForm({
             value={codeChangeLabel}
             onChange={(event) => setCodeChangeLabel(event.target.value)}
             aria-invalid={invalidFields.has("code-label")}
-            aria-describedby={invalidFields.has("code-label") ? "policy-error" : undefined}
+            aria-describedby={invalidFields.has("code-label") ? (requiredError ? "required-error" : "field-error") : undefined}
           />
         </label>
         <label>
@@ -313,7 +313,7 @@ function PolicyForm({
             value={releaseOpsLabel}
             onChange={(event) => setReleaseOpsLabel(event.target.value)}
             aria-invalid={invalidFields.has("ops-label")}
-            aria-describedby={invalidFields.has("ops-label") ? "policy-error" : undefined}
+            aria-describedby={invalidFields.has("ops-label") ? (requiredError ? "required-error" : "field-error") : undefined}
           />
         </label>
         <label>
@@ -322,7 +322,7 @@ function PolicyForm({
             value={blockerLabel}
             onChange={(event) => setBlockerLabel(event.target.value)}
             aria-invalid={invalidFields.has("blocker-label")}
-            aria-describedby={invalidFields.has("blocker-label") ? "policy-error" : undefined}
+            aria-describedby={invalidFields.has("blocker-label") ? (requiredError ? "required-error" : "field-error") : undefined}
           />
         </label>
       </fieldset>
@@ -340,8 +340,8 @@ function PolicyForm({
                   [check]: event.target.value as CheckSelection,
                 }))
               }
-              aria-invalid={checksError}
-              aria-describedby={checksError ? "policy-error" : undefined}
+              aria-invalid={checksError && !checkCategories[check]}
+              aria-describedby={checksError && !checkCategories[check] ? "checks-error" : undefined}
             >
               <option value="">Choose category</option>
               {CHECK_OPTIONS.map((category) => (
@@ -364,7 +364,7 @@ function PolicyForm({
             value={previousMilestone}
             onChange={(event) => setPreviousMilestone(event.target.value)}
             aria-invalid={invalidFields.has("previous-milestone")}
-            aria-describedby={invalidFields.has("previous-milestone") ? "policy-error" : undefined}
+            aria-describedby={invalidFields.has("previous-milestone") ? "field-error" : undefined}
           />
         </label>
         <label>
@@ -374,21 +374,21 @@ function PolicyForm({
             value={previousReleaseBranch}
             onChange={(event) => setPreviousReleaseBranch(event.target.value)}
             aria-invalid={invalidFields.has("previous-branch")}
-            aria-describedby={invalidFields.has("previous-branch") ? "policy-error" : undefined}
+            aria-describedby={invalidFields.has("previous-branch") ? "field-error" : undefined}
           />
         </label>
       </fieldset>
 
       {requiredError ? (
-        <p id="policy-error" role="alert">Enter the required release fields</p>
+        <p id="required-error" role="alert">Enter the required release fields</p>
       ) : null}
       {checksError ? (
-        <p id={requiredError ? undefined : "policy-error"} role="alert">
+        <p id="checks-error" role="alert">
           Classify every discovered check
         </p>
       ) : null}
       {saveError ? (
-        <p id={requiredError || checksError ? undefined : "policy-error"} role="alert">
+        <p id={invalidFields.size > 0 ? "field-error" : "server-error"} role="alert">
           {saveMessage}
         </p>
       ) : null}
