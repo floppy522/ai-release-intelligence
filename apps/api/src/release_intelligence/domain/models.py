@@ -70,6 +70,8 @@ class ReleaseSnapshot:
     source_errors: tuple[SourceError, ...] = ()
     candidate_ref: str = ""
     candidate_sha: str = ""
+    previous_milestone_number: int | None = None
+    previous_release_branch: str | None = None
     items: tuple[GitHubItem, ...] = ()
     links: tuple[ReleaseLink, ...] = ()
     pull_requests: tuple[GitHubPullRequest, ...] = ()
