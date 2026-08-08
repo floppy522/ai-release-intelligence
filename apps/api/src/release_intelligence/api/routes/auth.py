@@ -211,7 +211,7 @@ async def logout(
     return response
 
 
-@router.get("/repositories/{owner}/{name}", response_model=RepositoryResponse)
+@router.get("/repositories/by-name/{owner}/{name}", response_model=RepositoryResponse)
 async def repository_details(
     owner: str,
     name: str,

@@ -182,9 +182,39 @@ it("refetches the latest policy after a version conflict", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "Policy changed. Latest version reloaded.",
+    "Policy changed and no latest version was found.",
   );
   expect(getReleasePolicy).toHaveBeenCalledTimes(2);
+});
+
+it("applies only a freshly fetched record after conflict", async () => {
+  vi.mocked(getReleasePolicy)
+    .mockResolvedValueOnce(null)
+    .mockResolvedValueOnce(policyRecord(9, "trunk"));
+  vi.mocked(putReleasePolicy).mockRejectedValue(new ApiError(409));
+  renderWithQueryClient(<ReleaseSetup {...PROPS} />);
+  await fillRequiredPolicy();
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Policy changed. Latest version reloaded.",
+  );
+  expect(screen.getByLabelText("Main branch")).toHaveValue("trunk");
+});
+
+it("reports a conflict refetch error without claiming reload", async () => {
+  vi.mocked(getReleasePolicy)
+    .mockResolvedValueOnce(null)
+    .mockRejectedValueOnce(new ApiError(503));
+  vi.mocked(putReleasePolicy).mockRejectedValue(new ApiError(409));
+  renderWithQueryClient(<ReleaseSetup {...PROPS} />);
+  await fillRequiredPolicy();
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Policy changed, but the latest version could not be loaded.",
+  );
+  expect(screen.getByLabelText("Main branch")).toHaveValue("main");
 });
 
 it("applies the canonical policy returned by the server", async () => {
@@ -260,4 +290,23 @@ async function fillRequiredPolicy() {
   ]) {
     fireEvent.change(screen.getByLabelText(label), { target: { value } });
   }
+}
+
+function policyRecord(version: number, mainBranch: string) {
+  return {
+    repository_id: "987654",
+    version,
+    created_at: "2026-08-07T14:30:00Z",
+    policy: {
+      main_branch: mainBranch,
+      candidate_branch: "release/2026-08-10",
+      milestone_number: 7,
+      code_change_label: "code-change",
+      release_ops_label: "release-ops",
+      blocker_label: "release-blocker",
+      check_categories: { api: "BLOCKING" as const, security: "ADVISORY" as const },
+      previous_milestone_number: null,
+      previous_release_branch: null,
+    },
+  };
 }

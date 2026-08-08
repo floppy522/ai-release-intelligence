@@ -52,6 +52,17 @@ class PolicyUpsertRequest(BaseModel):
     previous_release_branch: str | None = Field(default=None, max_length=255)
     expected_version: int | None = Field(default=None, gt=0, le=2_147_483_647)
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_raw_normalized_category_duplicates(cls, value: object) -> object:
+        if isinstance(value, dict):
+            categories = value.get("check_categories")
+            if isinstance(categories, dict):
+                normalized = [str(name).strip() for name in categories]
+                if len(set(normalized)) != len(normalized):
+                    raise ValueError("check category names must be unique")
+        return value
+
     @model_validator(mode="after")
     def reject_duplicate_discovered_checks(self) -> Self:
         if len(set(self.discovered_checks)) != len(self.discovered_checks):

@@ -49,7 +49,13 @@ class PolicyRepository:
                 policy.model_dump(mode="json")
             )
             canonical_payload = canonical_policy.model_dump(mode="json")
-        except (ValidationError, PolicyValidationError, TypeError, ValueError):
+        except (
+            AttributeError,
+            ValidationError,
+            PolicyValidationError,
+            TypeError,
+            ValueError,
+        ):
             raise PolicyPersistenceError() from None
         try:
             async with self._sessions() as session, session.begin():

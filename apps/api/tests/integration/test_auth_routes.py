@@ -397,8 +397,10 @@ async def test_repository_access_binds_user_installation_and_repository(
         )
     )
 
-    allowed = await client.get("/api/repositories/example/allowed")
-    other_installation = await client.get("/api/repositories/other-owner/private-repo")
+    allowed = await client.get("/api/repositories/by-name/example/allowed")
+    other_installation = await client.get(
+        "/api/repositories/by-name/other-owner/private-repo"
+    )
 
     assert allowed.status_code == 200
     assert allowed.json()["installation_id"] == 123

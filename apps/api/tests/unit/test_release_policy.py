@@ -151,3 +151,16 @@ def test_policy_rejects_ambiguous_previous_release_context(
 ) -> None:
     with pytest.raises((PolicyValidationError, ValidationError)):
         ReleasePolicy(**{**BASE_POLICY, **updates})
+
+
+def test_validated_model_copy_remains_immutable_and_rejects_invalid_updates() -> None:
+    policy = ReleasePolicy(**BASE_POLICY)
+    copied = policy.model_copy(
+        update={"check_categories": {"new": "IGNORED"}}
+    )
+
+    assert copied.check_categories["new"] is CheckCategory.IGNORED
+    with pytest.raises(TypeError):
+        copied.check_categories["new"] = CheckCategory.BLOCKING  # type: ignore[index]
+    with pytest.raises((PolicyValidationError, ValidationError)):
+        policy.model_copy(update={"candidate_branch": "main"})

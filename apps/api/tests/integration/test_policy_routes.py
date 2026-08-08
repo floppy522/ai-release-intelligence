@@ -60,7 +60,7 @@ class FakeAuthStore:
     ) -> AuthorizedRepository | None:
         if not self.allow_repository or user_id != "github:7":
             return None
-        if repository_id == "example/release-intelligence":
+        if repository_id in {"example/release-intelligence", "123/policy"}:
             return AuthorizedRepository(
                 repository_id=REPOSITORY_ID,
                 full_name="example/release-intelligence",
@@ -245,7 +245,10 @@ async def test_numeric_policy_route_does_not_shadow_repository_name_route(
 ) -> None:
     async with await request_client(auth_store, policy_store) as client:
         repository = await client.get(
-            "/api/repositories/example/release-intelligence"
+            "/api/repositories/by-name/example/release-intelligence"
+        )
+        numeric_owner = await client.get(
+            "/api/repositories/by-name/123/policy"
         )
         noncanonical = await client.get(
             f"/api/repositories/00{REPOSITORY_ID}/policy"
@@ -254,6 +257,7 @@ async def test_numeric_policy_route_does_not_shadow_repository_name_route(
 
     assert repository.status_code == 200
     assert repository.json()["repository_id"] == REPOSITORY_ID
+    assert numeric_owner.status_code == 200
     assert noncanonical.status_code == 422
     assert noncanonical.json() == {"detail": "Repository ID is invalid"}
     assert zero.status_code == 422
@@ -275,3 +279,21 @@ async def test_duplicate_discovered_checks_return_sanitized_422(
 
     assert response.status_code == 422
     assert response.json() == {"detail": "Release policy request is invalid"}
+
+
+async def test_normalized_duplicate_category_keys_cannot_downgrade_a_check(
+    auth_store: FakeAuthStore, policy_store: MemoryPolicyStore
+) -> None:
+    async with await request_client(auth_store, policy_store) as client:
+        response = await client.put(
+            f"/api/repositories/{REPOSITORY_ID}/policy",
+            json={
+                **POLICY_PAYLOAD,
+                "check_categories": {"api": "BLOCKING", " api ": "IGNORED"},
+                "discovered_checks": ["api"],
+                "expected_version": None,
+            },
+        )
+
+    assert response.status_code == 422
+    assert policy_store.records == []

@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from datetime import date
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Self
+from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
@@ -37,6 +37,15 @@ class ReleasePolicy(BaseModel):
     check_categories: Mapping[str, CheckCategory]
     previous_milestone_number: int | None = Field(default=None, gt=0)
     previous_release_branch: str | None = None
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> Self:
+        del deep
+        payload = self.model_dump(mode="json")
+        if update:
+            payload.update(update)
+        return self.__class__.model_validate(payload)
 
     @field_serializer("check_categories")
     def serialize_check_categories(

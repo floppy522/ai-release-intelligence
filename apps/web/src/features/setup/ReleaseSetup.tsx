@@ -44,7 +44,9 @@ export function ReleaseSetup({
   }
 
   if (query.isPending) return <p>Loading release policy…</p>;
-  if (query.isError) return <p role="alert">Could not load release policy.</p>;
+  if (query.isError && query.data === undefined) {
+    return <p role="alert">Could not load release policy.</p>;
+  }
 
   return (
     <PolicyForm
@@ -55,7 +57,12 @@ export function ReleaseSetup({
       onSaved={(record) =>
         queryClient.setQueryData(["release-policy", repositoryId], record)
       }
-      reload={async () => (await query.refetch()).data ?? null}
+      reload={async () => {
+        const result = await query.refetch();
+        if (result.isError) return { kind: "error" };
+        if (!result.data) return { kind: "missing" };
+        return { kind: "record", record: result.data };
+      }}
     />
   );
 }
@@ -63,8 +70,13 @@ export function ReleaseSetup({
 interface PolicyFormProps extends ReleaseSetupProps {
   initial: PolicyRecord | null;
   onSaved: (record: PolicyRecord) => void;
-  reload: () => Promise<PolicyRecord | null>;
+  reload: () => Promise<ReloadResult>;
 }
+
+type ReloadResult =
+  | { kind: "record"; record: PolicyRecord }
+  | { kind: "missing" }
+  | { kind: "error" };
 
 function PolicyForm({
   repositoryId,
@@ -118,6 +130,7 @@ function PolicyForm({
   const [requiredError, setRequiredError] = useState(false);
   const [checksError, setChecksError] = useState(false);
   const [saveError, setSaveError] = useState(false);
+  const [fieldError, setFieldError] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
   const [savedVersion, setSavedVersion] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
@@ -151,6 +164,7 @@ function PolicyForm({
   async function savePolicy(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSaveError(false);
+    setFieldError(false);
     setSaveMessage("");
     setSavedVersion(null);
     const requiredMissing = [
@@ -181,6 +195,7 @@ function PolicyForm({
     if (requiredMissing || unclassified || semanticError) {
       if (semanticError) {
         setSaveError(true);
+        setFieldError(true);
         setSaveMessage(semanticError);
       }
       return;
@@ -214,9 +229,17 @@ function PolicyForm({
       setSaveError(true);
       if (error instanceof ApiError && error.status === 409) {
         const latest = await reload();
-        if (latest) applyRecord(latest);
-        setSaveMessage("Policy changed. Latest version reloaded.");
+        if (latest.kind === "record") {
+          applyRecord(latest.record);
+          onSaved(latest.record);
+          setSaveMessage("Policy changed. Latest version reloaded.");
+        } else if (latest.kind === "missing") {
+          setSaveMessage("Policy changed and no latest version was found.");
+        } else {
+          setSaveMessage("Policy changed, but the latest version could not be loaded.");
+        }
       } else if (error instanceof ApiError && error.status === 422) {
+        setFieldError(true);
         setSaveMessage("Review the policy fields and try again.");
       } else {
         setSaveMessage("Could not save policy. Reload and try again.");
@@ -241,8 +264,8 @@ function PolicyForm({
           min="1"
           value={milestoneNumber}
           onChange={(event) => setMilestoneNumber(event.target.value)}
-          aria-invalid={requiredError || saveError}
-          aria-describedby="policy-error"
+          aria-invalid={requiredError || fieldError}
+          aria-describedby={requiredError || saveError ? "policy-error" : undefined}
         />
       </label>
       <label>
@@ -250,8 +273,8 @@ function PolicyForm({
         <input
           value={mainBranch}
           onChange={(event) => setMainBranch(event.target.value)}
-          aria-invalid={requiredError || saveError}
-          aria-describedby="policy-error"
+          aria-invalid={requiredError || fieldError}
+          aria-describedby={requiredError || saveError ? "policy-error" : undefined}
         />
       </label>
       <label>
@@ -260,8 +283,8 @@ function PolicyForm({
           placeholder="release/YYYY-MM-DD"
           value={candidateBranch}
           onChange={(event) => setCandidateBranch(event.target.value)}
-          aria-invalid={requiredError || saveError}
-          aria-describedby="policy-error"
+          aria-invalid={requiredError || fieldError}
+          aria-describedby={requiredError || saveError ? "policy-error" : undefined}
         />
       </label>
 
@@ -272,8 +295,8 @@ function PolicyForm({
           <input
             value={codeChangeLabel}
             onChange={(event) => setCodeChangeLabel(event.target.value)}
-            aria-invalid={requiredError || saveError}
-            aria-describedby="policy-error"
+            aria-invalid={requiredError || fieldError}
+            aria-describedby={requiredError || saveError ? "policy-error" : undefined}
           />
         </label>
         <label>
@@ -281,8 +304,8 @@ function PolicyForm({
           <input
             value={releaseOpsLabel}
             onChange={(event) => setReleaseOpsLabel(event.target.value)}
-            aria-invalid={requiredError || saveError}
-            aria-describedby="policy-error"
+            aria-invalid={requiredError || fieldError}
+            aria-describedby={requiredError || saveError ? "policy-error" : undefined}
           />
         </label>
         <label>
@@ -290,8 +313,8 @@ function PolicyForm({
           <input
             value={blockerLabel}
             onChange={(event) => setBlockerLabel(event.target.value)}
-            aria-invalid={requiredError || saveError}
-            aria-describedby="policy-error"
+            aria-invalid={requiredError || fieldError}
+            aria-describedby={requiredError || saveError ? "policy-error" : undefined}
           />
         </label>
       </fieldset>
@@ -310,7 +333,7 @@ function PolicyForm({
                 }))
               }
               aria-invalid={checksError}
-              aria-describedby="policy-error"
+              aria-describedby={checksError ? "policy-error" : undefined}
             >
               <option value="">Choose category</option>
               {CHECK_OPTIONS.map((category) => (
@@ -332,8 +355,8 @@ function PolicyForm({
             min="1"
             value={previousMilestone}
             onChange={(event) => setPreviousMilestone(event.target.value)}
-            aria-invalid={saveError}
-            aria-describedby="policy-error"
+            aria-invalid={fieldError}
+            aria-describedby={saveError ? "policy-error" : undefined}
           />
         </label>
         <label>
@@ -342,8 +365,8 @@ function PolicyForm({
             placeholder="release/YYYY-MM-DD"
             value={previousReleaseBranch}
             onChange={(event) => setPreviousReleaseBranch(event.target.value)}
-            aria-invalid={saveError}
-            aria-describedby="policy-error"
+            aria-invalid={fieldError}
+            aria-describedby={saveError ? "policy-error" : undefined}
           />
         </label>
       </fieldset>
@@ -392,7 +415,7 @@ function validatePolicyFields(values: PolicyFieldValues): string {
     values.codeChangeLabel,
     values.releaseOpsLabel,
     values.blockerLabel,
-  ].map((label) => label.trim().toLocaleLowerCase());
+  ].map((label) => label.trim().toLowerCase());
   if (new Set(labels).size !== labels.length) {
     return "Use three distinct issue labels.";
   }
