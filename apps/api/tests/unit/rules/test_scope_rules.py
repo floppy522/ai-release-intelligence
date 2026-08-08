@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+from release_intelligence.adapters.persistence.repositories import AnalysisRepository
 from release_intelligence.domain.models import (
     EvidenceRef,
     PullRequestComparison,
@@ -336,7 +337,7 @@ def test_one_fully_valid_linked_pr_satisfies_the_issue() -> None:
             pull(143),
         ),
         comparisons=(
-            comparison(144, status="behind", merge_base_sha="older-sha"),
+            comparison(144, status="behind", merge_base_sha="1" * 40),
             comparison(143),
         ),
     )
@@ -548,7 +549,7 @@ def test_milestone_finding_fingerprints_the_pr_item_evidence() -> None:
     "corrupt_comparisons",
     [
         (),
-        (comparison(143, base_sha="different-merge"),),
+        (comparison(143, base_sha="5" * 40),),
         (
             comparison(143),
             replace(
@@ -571,15 +572,13 @@ def test_missing_or_ambiguous_comparison_does_not_fail_open(
 def test_candidate_finding_fingerprints_the_comparison_evidence() -> None:
     behind = evaluate_scope(
         snapshot(
-            comparisons=(comparison(143, status="behind", merge_base_sha="older-sha"),)
+            comparisons=(comparison(143, status="behind", merge_base_sha="1" * 40),)
         ),
         POLICY,
     )[0]
     diverged = evaluate_scope(
         snapshot(
-            comparisons=(
-                comparison(143, status="diverged", merge_base_sha="older-sha"),
-            )
+            comparisons=(comparison(143, status="diverged", merge_base_sha="1" * 40),)
         ),
         POLICY,
     )[0]
@@ -617,16 +616,40 @@ def test_duplicate_comparison_evidence_is_idempotent() -> None:
                 ),
             ),
         ),
+        lambda release: replace(
+            release,
+            comparisons=(comparison(head_sha="5" * 40),),
+        ),
+        lambda release: replace(
+            release,
+            comparisons=(
+                comparison(
+                    commits=(
+                        GitHubCommit(
+                            sha=MIDDLE_SHA,
+                            url=(
+                                "https://github.com/attacker/repo/commit/" + MIDDLE_SHA
+                            ),
+                            committed_at=NOW,
+                        ),
+                        GitHubCommit(
+                            sha=CANDIDATE_SHA,
+                            url=(
+                                f"https://github.com/{REPOSITORY}/commit/"
+                                f"{CANDIDATE_SHA}"
+                            ),
+                            committed_at=NOW,
+                        ),
+                    )
+                ),
+            ),
+        ),
     ],
 )
-def test_candidate_evidence_must_be_bound_to_the_repository(
+def test_invalid_candidate_evidence_identity_is_not_a_business_blocker(
     corrupt,
 ) -> None:
-    findings = evaluate_scope(corrupt(snapshot()), POLICY)
-
-    assert tuple(finding.rule_id for finding in findings) == (
-        "scope.change_requires_candidate_inclusion",
-    )
+    assert evaluate_scope(corrupt(snapshot()), POLICY) == ()
 
 
 def test_comparison_url_must_bind_exact_base_and_head_shas() -> None:
@@ -645,11 +668,7 @@ def test_comparison_url_must_bind_exact_base_and_head_shas() -> None:
         ),
     )
 
-    findings = evaluate_scope(release, POLICY)
-
-    assert tuple(finding.rule_id for finding in findings) == (
-        "scope.change_requires_candidate_inclusion",
-    )
+    assert evaluate_scope(release, POLICY) == ()
 
 
 def test_identical_comparison_is_valid_only_for_the_candidate_commit() -> None:
@@ -666,6 +685,43 @@ def test_identical_comparison_is_valid_only_for_the_candidate_commit() -> None:
     )
 
     assert evaluate_scope(release, POLICY) == ()
+
+
+def test_ahead_comparison_commit_order_does_not_define_head() -> None:
+    valid = comparison()
+    non_monotonic = replace(
+        valid,
+        comparison=replace(
+            valid.comparison,
+            commits=tuple(reversed(valid.comparison.commits)),
+        ),
+    )
+
+    assert evaluate_scope(snapshot(comparisons=(non_monotonic,)), POLICY) == ()
+
+
+def test_ahead_comparison_requires_head_once_in_complete_commit_set() -> None:
+    other_sha = "5" * 40
+    missing_head = comparison(
+        commits=(
+            GitHubCommit(
+                sha=MIDDLE_SHA,
+                url=f"https://github.com/{REPOSITORY}/commit/{MIDDLE_SHA}",
+                committed_at=NOW,
+            ),
+            GitHubCommit(
+                sha=other_sha,
+                url=f"https://github.com/{REPOSITORY}/commit/{other_sha}",
+                committed_at=NOW,
+            ),
+        )
+    )
+
+    findings = evaluate_scope(snapshot(comparisons=(missing_head,)), POLICY)
+
+    assert tuple(finding.rule_id for finding in findings) == (
+        "scope.change_requires_candidate_inclusion",
+    )
 
 
 @pytest.mark.parametrize(
@@ -705,22 +761,7 @@ def test_identical_comparison_is_valid_only_for_the_candidate_commit() -> None:
                 ),
             )
         ),
-        comparison(head_sha="5" * 40),
         comparison(merge_base_sha="6" * 40),
-        comparison(
-            commits=(
-                GitHubCommit(
-                    sha=MIDDLE_SHA,
-                    url="https://github.com/attacker/repo/commit/" + MIDDLE_SHA,
-                    committed_at=NOW,
-                ),
-                GitHubCommit(
-                    sha=CANDIDATE_SHA,
-                    url=f"https://github.com/{REPOSITORY}/commit/{CANDIDATE_SHA}",
-                    committed_at=NOW,
-                ),
-            )
-        ),
         comparison(
             commits=(
                 GitHubCommit(
@@ -840,6 +881,7 @@ def test_invalid_snapshot_prerequisites_do_not_infer_absence_findings(corrupt) -
 
 
 MALFORMED_URLS = [
+    "https://github.com/example/release-intelligence/pull/999",
     "https://user:secret@github.com/example/release-intelligence/pull/143",
     "https://github.com:443/example/release-intelligence/pull/143",
     "https://github.com:bad/example/release-intelligence/pull/143",
@@ -850,41 +892,19 @@ MALFORMED_URLS = [
 
 @pytest.mark.parametrize("malformed_url", MALFORMED_URLS)
 @pytest.mark.parametrize(
-    ("corrupt", "expected_rule"),
+    "corrupt",
     [
-        (
-            lambda release, url: replace(release, links=(link(url=url),)),
-            "scope.code_change_requires_pr",
-        ),
-        (
-            lambda release, url: replace(release, pull_requests=(pull(url=url),)),
-            "scope.pr_requires_milestone",
-        ),
-        (
-            lambda release, url: replace(release, items=(issue(), pull_item(url=url))),
-            "scope.pr_requires_milestone",
-        ),
-        (
-            lambda release, url: replace(release, items=(issue(url=url), pull_item())),
-            "scope.exactly_one_type",
-        ),
-        (
-            lambda release, url: replace(release, comparisons=(comparison(url=url),)),
-            "scope.change_requires_candidate_inclusion",
-        ),
+        lambda release, url: replace(release, links=(link(url=url),)),
+        lambda release, url: replace(release, pull_requests=(pull(url=url),)),
+        lambda release, url: replace(release, items=(issue(), pull_item(url=url))),
+        lambda release, url: replace(release, items=(issue(url=url), pull_item())),
+        lambda release, url: replace(release, comparisons=(comparison(url=url),)),
     ],
 )
 def test_malformed_evidence_urls_never_crash_or_pass(
-    malformed_url: str, corrupt, expected_rule: str
+    malformed_url: str, corrupt
 ) -> None:
-    findings = evaluate_scope(corrupt(snapshot(), malformed_url), POLICY)
-
-    assert tuple(finding.rule_id for finding in findings) == (expected_rule,)
-    assert all(
-        _is_direct_github_issue_or_pr(ref.url)
-        for finding in findings
-        for ref in finding.evidence
-    )
+    assert evaluate_scope(corrupt(snapshot(), malformed_url), POLICY) == ()
 
 
 @pytest.mark.parametrize(
@@ -900,6 +920,21 @@ def test_invalid_repository_identity_never_synthesizes_evidence(
     )
 
     assert evaluate_scope(missing_pr, POLICY) == ()
+
+
+def test_legacy_comparison_without_head_identity_is_not_a_candidate_blocker() -> None:
+    payload = AnalysisRepository._snapshot_payload(snapshot())
+    comparisons = payload["comparisons"]
+    assert isinstance(comparisons, list)
+    comparison_payload = comparisons[0]
+    assert isinstance(comparison_payload, dict)
+    comparison_facts = comparison_payload["comparison"]
+    assert isinstance(comparison_facts, dict)
+    comparison_facts.pop("head_sha")
+    restored = AnalysisRepository._snapshot_from_payload(payload)
+
+    assert restored.comparisons[0].comparison.head_sha == ""
+    assert evaluate_scope(restored, POLICY) == ()
 
 
 def test_duplicate_supported_label_is_one_logical_type() -> None:

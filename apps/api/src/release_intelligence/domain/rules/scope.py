@@ -200,6 +200,7 @@ def _has_valid_prerequisites(snapshot: ReleaseSnapshot, policy: ReleasePolicy) -
         or not snapshot.repository_id.strip()
         or not _is_repository_name(snapshot.repository_full_name)
         or not _is_sha(snapshot.candidate_sha)
+        or not _has_valid_evidence_identity(snapshot)
     ):
         return False
     started_at = snapshot.fetch_started_at
@@ -211,6 +212,57 @@ def _has_valid_prerequisites(snapshot: ReleaseSnapshot, policy: ReleasePolicy) -
         and fetched_at.tzinfo is not None
         and started_at <= fetched_at
     )
+
+
+def _has_valid_evidence_identity(snapshot: ReleaseSnapshot) -> bool:
+    repository = snapshot.repository_full_name
+    issue_numbers = {
+        item.number for item in snapshot.items if item.kind is GitHubItemKind.ISSUE
+    }
+    pull_numbers = {pull.number for pull in snapshot.pull_requests}
+    for item in snapshot.items:
+        if item.kind is GitHubItemKind.PULL_REQUEST:
+            if not _is_direct_url(item.url, repository, "pull", item.number):
+                return False
+        elif (
+            item.state.lower() == "open"
+            and item.milestone_number == snapshot.milestone_number
+            and not _is_direct_url(item.url, repository, "issues", item.number)
+        ):
+            return False
+    if any(
+        link.issue_number not in issue_numbers
+        or not _is_direct_url(link.url, repository, "pull", link.pull_request_number)
+        for link in snapshot.links
+    ):
+        return False
+    if any(
+        not _is_direct_url(pull.url, repository, "pull", pull.number)
+        for pull in snapshot.pull_requests
+    ):
+        return False
+    for relation in snapshot.comparisons:
+        comparison = relation.comparison
+        if (
+            relation.pull_request_number not in pull_numbers
+            or not _is_sha(comparison.base_sha)
+            or not _is_sha(comparison.merge_base_sha)
+            or not _is_sha(comparison.head_sha)
+            or comparison.head_sha != snapshot.candidate_sha
+            or not _is_comparison_url(
+                comparison.url,
+                repository,
+                comparison.base_sha,
+                comparison.head_sha,
+            )
+            or any(
+                not _is_sha(commit.sha)
+                or not _is_commit_url(commit.url, repository, commit.sha)
+                for commit in comparison.commits
+            )
+        ):
+            return False
+    return True
 
 
 def _issue_records(
@@ -388,7 +440,7 @@ def _is_valid_comparison(
         or comparison.total_commits != comparison.ahead_by
         or comparison.total_commits != len(commits)
         or not commits
-        or commits[-1].sha != comparison.head_sha
+        or sum(commit.sha == comparison.head_sha for commit in commits) != 1
         or len({commit.sha for commit in commits}) != len(commits)
     ):
         return False
