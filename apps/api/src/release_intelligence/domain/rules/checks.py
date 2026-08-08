@@ -527,12 +527,12 @@ def _is_check_url(url: str, repository: str, run_id: int) -> bool:
     elif (
         len(parts) == 5
         and parts[:2] == ["actions", "runs"]
-        and parts[3] == "job"
+        and parts[3] in {"job", "jobs"}
     ):
         workflow_id, final_id = parts[2], parts[4]
     else:
         return False
-    return _is_bounded_decimal(workflow_id) and final_id == str(run_id)
+    return _is_bounded_decimal(workflow_id) and _is_bounded_decimal(final_id)
 
 
 def _is_bounded_decimal(value: str) -> bool:

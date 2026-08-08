@@ -214,7 +214,7 @@ async def test_check_fixture_maps_runs_without_logs() -> None:
         "https://github.com/octo-fixtures/release-demo/runs/9400001"
     )
     assert checks[1].url == (
-        "https://github.com/octo-fixtures/release-demo/actions/runs/8800001/job/9400002"
+        "https://github.com/octo-fixtures/release-demo/actions/runs/8800001/jobs/7700001"
     )
     assert checks[0].head_sha == "4" * 40
     assert not hasattr(checks[0], "output")

@@ -165,8 +165,9 @@ def test_workflow_run_url_is_not_valid_check_run_evidence() -> None:
 @pytest.mark.parametrize(
     "url",
     [
-        "https://github.com/acme/widgets/runs/800/jobs/101",
-        "https://github.com/acme/widgets/actions/runs/800/job/101",
+        "https://github.com/acme/widgets/runs/800/jobs/700",
+        "https://github.com/acme/widgets/actions/runs/800/job/700",
+        "https://github.com/acme/widgets/actions/runs/800/jobs/700",
     ],
 )
 def test_check_run_accepts_known_actions_job_urls(url: str) -> None:
@@ -178,14 +179,20 @@ def test_check_run_accepts_known_actions_job_urls(url: str) -> None:
 @pytest.mark.parametrize(
     "url",
     [
-        "https://github.com/acme/widgets/runs/800/jobs/102",
-        "https://github.com/acme/widgets/actions/runs/800/job/102",
-        "https://github.com/acme/widgets/runs/0/jobs/101",
-        f"https://github.com/acme/widgets/runs/{2**63}/jobs/101",
-        f"https://github.com/acme/widgets/runs/{'9' * 5000}/jobs/101",
-        "https://github.com/acme/widgets/runs/800/jobs/101/extra",
-        "https://github.com/acme/widgets/actions/runs/800/jobs/101",
-        "https://github.com/acme/widgets/actions/runs/800/job/101?attempt=2",
+        "https://github.com/acme/widgets/runs/102",
+        "https://github.com/acme/widgets/runs/0/jobs/700",
+        "https://github.com/acme/widgets/runs/800/jobs/0",
+        "https://github.com/acme/widgets/runs/800/jobs/not-a-number",
+        f"https://github.com/acme/widgets/runs/{2**63}/jobs/700",
+        f"https://github.com/acme/widgets/runs/800/jobs/{2**63}",
+        f"https://github.com/acme/widgets/runs/{'9' * 5000}/jobs/700",
+        "https://github.com/acme/widgets/runs/800/jobs/700/extra",
+        "https://github.com/acme/widgets/actions/runs/0/jobs/700",
+        "https://github.com/acme/widgets/actions/runs/800/job/not-a-number",
+        f"https://github.com/acme/widgets/actions/runs/800/jobs/{2**63}",
+        "https://github.com/acme/widgets/actions/runs/800/jobs/700/extra",
+        "https://github.com/acme/widgets/actions/runs/800/job/700?attempt=2",
+        "https://github.com/other/widgets/actions/runs/800/jobs/700",
     ],
 )
 def test_check_run_rejects_unsafe_or_ambiguous_actions_paths(url: str) -> None:
@@ -195,6 +202,21 @@ def test_check_run_rejects_unsafe_or_ambiguous_actions_paths(url: str) -> None:
         )
 
     assert raised.value.codes == ("check.invalid_identity:101",)
+
+
+def test_actions_job_url_preserves_check_identity_and_raw_safe_evidence_url() -> None:
+    url = "https://github.com/acme/widgets/actions/runs/800/jobs/700"
+    finding = evaluate_checks(
+        _snapshot(replace(_check(conclusion="failure"), url=url)),
+        _policy(),
+        decisions=(),
+    )[0]
+
+    assert finding.evidence[0].source_id == "101"
+    assert finding.evidence[0].url == url
+    assert finding.evidence[0].fingerprint == (
+        "sha256:b37be0d5dd38444c6bc42fd66a72e0a11b21dd160d664de7dc122707b0fca917"
+    )
 
 
 def test_unknown_successful_check_still_requires_classification() -> None:
