@@ -1,4 +1,5 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 
 import { ApiError, getReleasePolicy, putReleasePolicy } from "../../api/client";
@@ -274,6 +275,46 @@ it("validates calendar branches before sending and marks fields invalid", async 
     "true",
   );
   expect(putReleasePolicy).not.toHaveBeenCalled();
+});
+
+it("keeps configured checks when discovery changes after mount", async () => {
+  vi.mocked(putReleasePolicy).mockResolvedValue(policyRecord(1, "main"));
+
+  function Harness() {
+    const [checks, setChecks] = useState<readonly string[]>(["api", "security"]);
+    return (
+      <>
+        <button onClick={() => setChecks([...checks, "new-scan"])}>Add check</button>
+        <ReleaseSetup {...PROPS} discoveredChecks={checks} />
+      </>
+    );
+  }
+
+  renderWithQueryClient(<Harness />);
+  await fillRequiredPolicy();
+  fireEvent.click(screen.getByRole("button", { name: "Add check" }));
+  expect(await screen.findByLabelText("new-scan category")).toHaveValue("");
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+  expect(await screen.findByText("Classify every discovered check")).toBeInTheDocument();
+  expect(putReleasePolicy).not.toHaveBeenCalled();
+
+  fireEvent.change(screen.getByLabelText("new-scan category"), {
+    target: { value: "BLOCKING" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+  await waitFor(() =>
+    expect(putReleasePolicy).toHaveBeenCalledWith(
+      "987654",
+      expect.objectContaining({
+        check_categories: {
+          api: "BLOCKING",
+          security: "ADVISORY",
+          "new-scan": "BLOCKING",
+        },
+      }),
+      "csrf-token",
+    ),
+  );
 });
 
 async function fillRequiredPolicy() {

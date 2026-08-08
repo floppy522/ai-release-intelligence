@@ -81,9 +81,9 @@ class ReleasePolicy(BaseModel):
             raise PolicyValidationError(f"required values must not be blank: {blank[0]}")
 
         labels = (
-            self.code_change_label.strip().casefold(),
-            self.release_ops_label.strip().casefold(),
-            self.blocker_label.strip().casefold(),
+            self.code_change_label.strip().lower(),
+            self.release_ops_label.strip().lower(),
+            self.blocker_label.strip().lower(),
         )
         if len(set(labels)) != len(labels):
             raise PolicyValidationError("issue type and blocker labels must be distinct")

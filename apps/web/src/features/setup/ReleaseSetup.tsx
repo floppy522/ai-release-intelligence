@@ -130,7 +130,9 @@ function PolicyForm({
   const [requiredError, setRequiredError] = useState(false);
   const [checksError, setChecksError] = useState(false);
   const [saveError, setSaveError] = useState(false);
-  const [fieldError, setFieldError] = useState(false);
+  const [invalidFields, setInvalidFields] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
   const [saveMessage, setSaveMessage] = useState("");
   const [savedVersion, setSavedVersion] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
@@ -164,22 +166,28 @@ function PolicyForm({
   async function savePolicy(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSaveError(false);
-    setFieldError(false);
+    setInvalidFields(new Set());
     setSaveMessage("");
     setSavedVersion(null);
-    const requiredMissing = [
-      milestoneNumber,
-      mainBranch,
-      candidateBranch,
-      codeChangeLabel,
-      releaseOpsLabel,
-      blockerLabel,
-    ].some((value) => value.trim() === "");
+    const requiredValues: ReadonlyArray<readonly [string, string]> = [
+      ["milestone", milestoneNumber],
+      ["main", mainBranch],
+      ["candidate", candidateBranch],
+      ["code-label", codeChangeLabel],
+      ["ops-label", releaseOpsLabel],
+      ["blocker-label", blockerLabel],
+    ];
+    const invalid = new Set(
+      requiredValues
+        .filter(([, value]) => value.trim() === "")
+        .map(([field]) => field),
+    );
+    const requiredMissing = invalid.size > 0;
     const unclassified = allChecks.some(
       (check) => !checkCategories[check],
     );
-    const semanticError = requiredMissing
-      ? ""
+    const semantic = requiredMissing
+      ? { message: "", fields: [] as string[] }
       : validatePolicyFields({
           mainBranch,
           candidateBranch,
@@ -190,13 +198,14 @@ function PolicyForm({
           previousMilestone,
           previousReleaseBranch,
         });
+    semantic.fields.forEach((field) => invalid.add(field));
+    setInvalidFields(invalid);
     setRequiredError(requiredMissing);
     setChecksError(unclassified);
-    if (requiredMissing || unclassified || semanticError) {
-      if (semanticError) {
+    if (requiredMissing || unclassified || semantic.message) {
+      if (semantic.message) {
         setSaveError(true);
-        setFieldError(true);
-        setSaveMessage(semanticError);
+        setSaveMessage(semantic.message);
       }
       return;
     }
@@ -239,7 +248,6 @@ function PolicyForm({
           setSaveMessage("Policy changed, but the latest version could not be loaded.");
         }
       } else if (error instanceof ApiError && error.status === 422) {
-        setFieldError(true);
         setSaveMessage("Review the policy fields and try again.");
       } else {
         setSaveMessage("Could not save policy. Reload and try again.");
@@ -264,8 +272,8 @@ function PolicyForm({
           min="1"
           value={milestoneNumber}
           onChange={(event) => setMilestoneNumber(event.target.value)}
-          aria-invalid={requiredError || fieldError}
-          aria-describedby={requiredError || saveError ? "policy-error" : undefined}
+          aria-invalid={invalidFields.has("milestone")}
+          aria-describedby={invalidFields.has("milestone") ? "policy-error" : undefined}
         />
       </label>
       <label>
@@ -273,8 +281,8 @@ function PolicyForm({
         <input
           value={mainBranch}
           onChange={(event) => setMainBranch(event.target.value)}
-          aria-invalid={requiredError || fieldError}
-          aria-describedby={requiredError || saveError ? "policy-error" : undefined}
+          aria-invalid={invalidFields.has("main")}
+          aria-describedby={invalidFields.has("main") ? "policy-error" : undefined}
         />
       </label>
       <label>
@@ -283,8 +291,8 @@ function PolicyForm({
           placeholder="release/YYYY-MM-DD"
           value={candidateBranch}
           onChange={(event) => setCandidateBranch(event.target.value)}
-          aria-invalid={requiredError || fieldError}
-          aria-describedby={requiredError || saveError ? "policy-error" : undefined}
+          aria-invalid={invalidFields.has("candidate")}
+          aria-describedby={invalidFields.has("candidate") ? "policy-error" : undefined}
         />
       </label>
 
@@ -295,8 +303,8 @@ function PolicyForm({
           <input
             value={codeChangeLabel}
             onChange={(event) => setCodeChangeLabel(event.target.value)}
-            aria-invalid={requiredError || fieldError}
-            aria-describedby={requiredError || saveError ? "policy-error" : undefined}
+            aria-invalid={invalidFields.has("code-label")}
+            aria-describedby={invalidFields.has("code-label") ? "policy-error" : undefined}
           />
         </label>
         <label>
@@ -304,8 +312,8 @@ function PolicyForm({
           <input
             value={releaseOpsLabel}
             onChange={(event) => setReleaseOpsLabel(event.target.value)}
-            aria-invalid={requiredError || fieldError}
-            aria-describedby={requiredError || saveError ? "policy-error" : undefined}
+            aria-invalid={invalidFields.has("ops-label")}
+            aria-describedby={invalidFields.has("ops-label") ? "policy-error" : undefined}
           />
         </label>
         <label>
@@ -313,8 +321,8 @@ function PolicyForm({
           <input
             value={blockerLabel}
             onChange={(event) => setBlockerLabel(event.target.value)}
-            aria-invalid={requiredError || fieldError}
-            aria-describedby={requiredError || saveError ? "policy-error" : undefined}
+            aria-invalid={invalidFields.has("blocker-label")}
+            aria-describedby={invalidFields.has("blocker-label") ? "policy-error" : undefined}
           />
         </label>
       </fieldset>
@@ -355,8 +363,8 @@ function PolicyForm({
             min="1"
             value={previousMilestone}
             onChange={(event) => setPreviousMilestone(event.target.value)}
-            aria-invalid={fieldError}
-            aria-describedby={saveError ? "policy-error" : undefined}
+            aria-invalid={invalidFields.has("previous-milestone")}
+            aria-describedby={invalidFields.has("previous-milestone") ? "policy-error" : undefined}
           />
         </label>
         <label>
@@ -365,8 +373,8 @@ function PolicyForm({
             placeholder="release/YYYY-MM-DD"
             value={previousReleaseBranch}
             onChange={(event) => setPreviousReleaseBranch(event.target.value)}
-            aria-invalid={fieldError}
-            aria-describedby={saveError ? "policy-error" : undefined}
+            aria-invalid={invalidFields.has("previous-branch")}
+            aria-describedby={invalidFields.has("previous-branch") ? "policy-error" : undefined}
           />
         </label>
       </fieldset>
@@ -405,11 +413,19 @@ interface PolicyFieldValues {
   previousReleaseBranch: string;
 }
 
-function validatePolicyFields(values: PolicyFieldValues): string {
+interface FieldValidation {
+  message: string;
+  fields: string[];
+}
+
+function validatePolicyFields(values: PolicyFieldValues): FieldValidation {
   const main = values.mainBranch.trim();
   const candidate = values.candidateBranch.trim();
   if (!validReleaseBranch(candidate) || candidate === main) {
-    return "Use a valid candidate release branch distinct from main.";
+    return {
+      message: "Use a valid candidate release branch distinct from main.",
+      fields: candidate === main ? ["candidate", "main"] : ["candidate"],
+    };
   }
   const labels = [
     values.codeChangeLabel,
@@ -417,13 +433,19 @@ function validatePolicyFields(values: PolicyFieldValues): string {
     values.blockerLabel,
   ].map((label) => label.trim().toLowerCase());
   if (new Set(labels).size !== labels.length) {
-    return "Use three distinct issue labels.";
+    return {
+      message: "Use three distinct issue labels.",
+      fields: ["code-label", "ops-label", "blocker-label"],
+    };
   }
   const hasPreviousMilestone = values.previousMilestone.trim() !== "";
   const previousBranch = values.previousReleaseBranch.trim();
   const hasPreviousBranch = previousBranch !== "";
   if (hasPreviousMilestone !== hasPreviousBranch) {
-    return "Configure both previous-release fields or leave both empty.";
+    return {
+      message: "Configure both previous-release fields or leave both empty.",
+      fields: ["previous-milestone", "previous-branch"],
+    };
   }
   if (
     hasPreviousBranch &&
@@ -432,9 +454,12 @@ function validatePolicyFields(values: PolicyFieldValues): string {
       previousBranch === main ||
       Number(values.previousMilestone) === Number(values.milestoneNumber))
   ) {
-    return "Use distinct previous-release milestone and branch values.";
+    return {
+      message: "Use distinct previous-release milestone and branch values.",
+      fields: ["previous-milestone", "previous-branch"],
+    };
   }
-  return "";
+  return { message: "", fields: [] };
 }
 
 function validReleaseBranch(branch: string): boolean {

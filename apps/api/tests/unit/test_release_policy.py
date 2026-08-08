@@ -43,6 +43,19 @@ def test_policy_treats_github_label_names_as_case_insensitive() -> None:
         )
 
 
+def test_label_normalization_matches_javascript_simple_lower() -> None:
+    policy = ReleasePolicy(
+        **{
+            **BASE_POLICY,
+            "code_change_label": "straße",
+            "release_ops_label": "STRASSE",
+        }
+    )
+
+    assert policy.code_change_label == "straße"
+    assert policy.release_ops_label == "STRASSE"
+
+
 @pytest.mark.parametrize(
     "candidate_branch",
     ["feature/release", "release/2026-02-30"],
