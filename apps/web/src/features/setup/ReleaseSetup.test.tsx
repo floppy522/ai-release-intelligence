@@ -1,11 +1,12 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 
-import { getReleasePolicy, putReleasePolicy } from "../../api/client";
+import { ApiError, getReleasePolicy, putReleasePolicy } from "../../api/client";
 import { renderWithQueryClient } from "../../test/render";
 import { ReleaseSetup } from "./ReleaseSetup";
 
-vi.mock("../../api/client", () => ({
+vi.mock("../../api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/client")>()),
   getReleasePolicy: vi.fn(),
   putReleasePolicy: vi.fn(),
 }));
@@ -17,6 +18,7 @@ const PROPS = {
 };
 
 beforeEach(() => {
+  vi.clearAllMocks();
   vi.mocked(getReleasePolicy).mockResolvedValue(null);
   vi.mocked(putReleasePolicy).mockReset();
 });
@@ -117,3 +119,145 @@ it("shows a concise error when saving fails", async () => {
   );
   expect(screen.queryByText(/secret database URL/)).not.toBeInTheDocument();
 });
+
+it("preserves a configured blocking check that is absent from discovery", async () => {
+  vi.mocked(getReleasePolicy).mockResolvedValue({
+    repository_id: "987654",
+    version: 4,
+    created_at: "2026-08-07T14:30:00Z",
+    policy: {
+      main_branch: "main",
+      candidate_branch: "release/2026-08-10",
+      milestone_number: 7,
+      code_change_label: "code-change",
+      release_ops_label: "release-ops",
+      blocker_label: "release-blocker",
+      check_categories: { api: "ADVISORY", "required-legacy": "BLOCKING" },
+      previous_milestone_number: null,
+      previous_release_branch: null,
+    },
+  });
+  vi.mocked(putReleasePolicy).mockResolvedValue({
+    repository_id: "987654",
+    version: 5,
+    created_at: "2026-08-07T14:31:00Z",
+    policy: {
+      main_branch: "main",
+      candidate_branch: "release/2026-08-10",
+      milestone_number: 7,
+      code_change_label: "code-change",
+      release_ops_label: "release-ops",
+      blocker_label: "release-blocker",
+      check_categories: { api: "ADVISORY", "required-legacy": "BLOCKING" },
+      previous_milestone_number: null,
+      previous_release_branch: null,
+    },
+  });
+
+  renderWithQueryClient(
+    <ReleaseSetup {...PROPS} discoveredChecks={["api"]} />,
+  );
+
+  expect(await screen.findByLabelText("required-legacy category")).toHaveValue(
+    "BLOCKING",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+
+  await waitFor(() =>
+    expect(putReleasePolicy).toHaveBeenCalledWith(
+      "987654",
+      expect.objectContaining({
+        discovered_checks: ["api", "required-legacy"],
+        check_categories: { api: "ADVISORY", "required-legacy": "BLOCKING" },
+      }),
+      "csrf-token",
+    ),
+  );
+});
+
+it("refetches the latest policy after a version conflict", async () => {
+  vi.mocked(putReleasePolicy).mockRejectedValue(new ApiError(409));
+  renderWithQueryClient(<ReleaseSetup {...PROPS} />);
+  await fillRequiredPolicy();
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Policy changed. Latest version reloaded.",
+  );
+  expect(getReleasePolicy).toHaveBeenCalledTimes(2);
+});
+
+it("applies the canonical policy returned by the server", async () => {
+  vi.mocked(putReleasePolicy).mockResolvedValue({
+    repository_id: "987654",
+    version: 2,
+    created_at: "2026-08-07T14:30:00Z",
+    policy: {
+      main_branch: "main",
+      candidate_branch: "release/2026-08-10",
+      milestone_number: 7,
+      code_change_label: "code-change",
+      release_ops_label: "release-ops",
+      blocker_label: "release-blocker",
+      check_categories: { api: "BLOCKING", security: "ADVISORY" },
+      previous_milestone_number: null,
+      previous_release_branch: null,
+    },
+  });
+  renderWithQueryClient(<ReleaseSetup {...PROPS} />);
+  await fillRequiredPolicy();
+  fireEvent.change(screen.getByLabelText("Main branch"), {
+    target: { value: " main " },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "Policy version 2 saved",
+  );
+  expect(screen.getByLabelText("Main branch")).toHaveValue("main");
+});
+
+it("shows validation guidance for a server 422", async () => {
+  vi.mocked(putReleasePolicy).mockRejectedValue(new ApiError(422));
+  renderWithQueryClient(<ReleaseSetup {...PROPS} />);
+  await fillRequiredPolicy();
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Review the policy fields and try again.",
+  );
+});
+
+it("validates calendar branches before sending and marks fields invalid", async () => {
+  renderWithQueryClient(<ReleaseSetup {...PROPS} />);
+  await fillRequiredPolicy();
+  fireEvent.change(screen.getByLabelText("Candidate branch"), {
+    target: { value: "release/2026-02-30" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Use a valid candidate release branch distinct from main.",
+  );
+  expect(screen.getByLabelText("Candidate branch")).toHaveAttribute(
+    "aria-invalid",
+    "true",
+  );
+  expect(putReleasePolicy).not.toHaveBeenCalled();
+});
+
+async function fillRequiredPolicy() {
+  await screen.findByDisplayValue("987654");
+  for (const [label, value] of [
+    ["Milestone number", "7"],
+    ["Main branch", "main"],
+    ["Candidate branch", "release/2026-08-10"],
+    ["Code-change label", "code-change"],
+    ["Release-ops label", "release-ops"],
+    ["Blocker label", "release-blocker"],
+    ["api category", "BLOCKING"],
+    ["security category", "ADVISORY"],
+  ]) {
+    fireEvent.change(screen.getByLabelText(label), { target: { value } });
+  }
+}

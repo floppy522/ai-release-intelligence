@@ -59,6 +59,9 @@ jobs:
       - name: Reapply PostgreSQL migrations
         working-directory: apps/api
         run: uv run alembic upgrade head
+      - name: Verify policy contracts after migration round-trip
+        working-directory: apps/api
+        run: uv run pytest tests/integration/test_policy_repository.py -v
       - name: Lint backend
         working-directory: apps/api
         run: uv run ruff check src tests

@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from release_intelligence.domain.policy import (
     CheckCategory,
@@ -85,3 +86,68 @@ def test_policy_preserves_optional_previous_release_context() -> None:
     assert policy.previous_milestone_number == 6
     assert policy.previous_release_branch == "release/2026-08-03"
     assert policy.check_categories["api"] is CheckCategory.BLOCKING
+
+
+def test_policy_is_deeply_immutable_canonical_and_defensive() -> None:
+    categories = {
+        " security ": CheckCategory.ADVISORY,
+        "api": CheckCategory.BLOCKING,
+    }
+    policy = ReleasePolicy(
+        **{
+            **BASE_POLICY,
+            "main_branch": " main ",
+            "candidate_branch": " release/2026-08-10 ",
+            "code_change_label": " code-change ",
+            "check_categories": categories,
+        }
+    )
+    categories["api"] = CheckCategory.IGNORED
+
+    assert policy.main_branch == "main"
+    assert policy.candidate_branch == "release/2026-08-10"
+    assert list(policy.check_categories) == ["api", "security"]
+    assert policy.check_categories["api"] is CheckCategory.BLOCKING
+    with pytest.raises(TypeError):
+        policy.check_categories["api"] = CheckCategory.IGNORED  # type: ignore[index]
+
+
+def test_policy_rejects_check_names_duplicated_after_normalization() -> None:
+    with pytest.raises(PolicyValidationError, match="duplicate check names"):
+        ReleasePolicy(
+            **{
+                **BASE_POLICY,
+                "check_categories": {
+                    "api": CheckCategory.BLOCKING,
+                    " api ": CheckCategory.ADVISORY,
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"candidate_branch": "main"},
+        {"main_branch": "release/2026-08-10"},
+        {"previous_milestone_number": 6},
+        {"previous_release_branch": "release/2026-08-03"},
+        {
+            "previous_milestone_number": 7,
+            "previous_release_branch": "release/2026-08-03",
+        },
+        {
+            "previous_milestone_number": 6,
+            "previous_release_branch": "release/2026-08-10",
+        },
+        {
+            "previous_milestone_number": 6,
+            "previous_release_branch": "main",
+        },
+    ],
+)
+def test_policy_rejects_ambiguous_previous_release_context(
+    updates: dict[str, object],
+) -> None:
+    with pytest.raises((PolicyValidationError, ValidationError)):
+        ReleasePolicy(**{**BASE_POLICY, **updates})

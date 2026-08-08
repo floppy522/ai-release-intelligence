@@ -14,7 +14,10 @@ import pytest
 
 from release_intelligence.adapters.persistence.policies import PolicyRepository
 from release_intelligence.domain.policy import CheckCategory, ReleasePolicy
-from release_intelligence.ports.policies import PolicyVersionConflictError
+from release_intelligence.ports.policies import (
+    PolicyPersistenceError,
+    PolicyVersionConflictError,
+)
 
 API_ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY_ID = "987654"
@@ -145,6 +148,77 @@ async def test_policy_rows_are_immutable_in_database(
             "UPDATE release_policies SET policy_payload = '{}'::jsonb "
             "WHERE configuration_version = 1"
         )
+    with pytest.raises(asyncpg.PostgresError, match="immutable policy records"):
+        await postgres.execute(
+            "DELETE FROM release_policies WHERE configuration_version = 1"
+        )
+    assert await postgres.fetchval(
+        "SELECT count(*) FROM release_policies WHERE configuration_version = 1"
+    ) == 1
+    with pytest.raises(PolicyVersionConflictError):
+        await repository.create_version(
+            repository_id=REPOSITORY_ID,
+            policy=policy,
+            expected_version=None,
+        )
+
+
+async def test_repository_cascade_can_delete_policy_history_for_retention(
+    repository: PolicyRepository,
+    postgres: asyncpg.Connection,
+    policy: ReleasePolicy,
+) -> None:
+    await repository.create_version(
+        repository_id=REPOSITORY_ID,
+        policy=policy,
+        expected_version=None,
+    )
+
+    await postgres.execute(
+        "DELETE FROM repository_connections WHERE external_repository_id = $1",
+        REPOSITORY_ID,
+    )
+
+    assert await postgres.fetchval("SELECT count(*) FROM release_policies") == 0
+
+
+async def test_legacy_policy_reference_coexists_with_configured_versions(
+    repository: PolicyRepository,
+    postgres: asyncpg.Connection,
+    policy: ReleasePolicy,
+) -> None:
+    await postgres.execute(
+        "INSERT INTO release_policies (id, repository_id, version) "
+        "VALUES ('00000000-0000-0000-0000-000000000002', "
+        "'00000000-0000-0000-0000-000000000001', 'legacy-v1')"
+    )
+
+    configured = await repository.create_version(
+        repository_id=REPOSITORY_ID,
+        policy=policy,
+        expected_version=None,
+    )
+
+    assert configured.version == 1
+    assert await postgres.fetchval("SELECT count(*) FROM release_policies") == 2
+
+
+async def test_corrupt_latest_policy_is_a_sanitized_persistence_failure(
+    repository: PolicyRepository,
+    postgres: asyncpg.Connection,
+) -> None:
+    await postgres.execute(
+        "INSERT INTO release_policies "
+        "(id, repository_id, version, configuration_version, policy_payload) "
+        "VALUES ('00000000-0000-0000-0000-000000000003', "
+        "'00000000-0000-0000-0000-000000000001', "
+        "'configuration:99', 99, '{}'::jsonb)"
+    )
+
+    with pytest.raises(PolicyPersistenceError) as raised:
+        await repository.get_latest(REPOSITORY_ID)
+
+    assert str(raised.value) == "Policy persistence unavailable"
 
 
 async def test_concurrent_stale_writers_cannot_lose_policy_update(

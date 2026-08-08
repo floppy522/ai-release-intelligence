@@ -46,24 +46,29 @@ def upgrade() -> None:
     )
     op.execute(
         """
-        CREATE FUNCTION prevent_immutable_policy_update()
+        CREATE FUNCTION prevent_immutable_policy_change()
         RETURNS trigger AS $$
         BEGIN
-            RAISE EXCEPTION 'immutable policy records cannot be updated';
+            IF TG_OP = 'UPDATE' OR pg_trigger_depth() = 1 THEN
+                RAISE EXCEPTION 'immutable policy records cannot be changed directly';
+            END IF;
+            RETURN OLD;
         END;
         $$ LANGUAGE plpgsql;
-        CREATE TRIGGER release_policies_immutable_update
-        BEFORE UPDATE ON release_policies FOR EACH ROW
-        EXECUTE FUNCTION prevent_immutable_policy_update();
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER release_policies_immutable_change
+        BEFORE UPDATE OR DELETE ON release_policies FOR EACH ROW
+        EXECUTE FUNCTION prevent_immutable_policy_change()
         """
     )
 
 
 def downgrade() -> None:
-    op.execute(
-        "DROP TRIGGER release_policies_immutable_update ON release_policies;"
-        "DROP FUNCTION prevent_immutable_policy_update();"
-    )
+    op.execute("DROP TRIGGER release_policies_immutable_change ON release_policies")
+    op.execute("DROP FUNCTION prevent_immutable_policy_change()")
     op.drop_constraint(
         "ck_release_policy_configuration_payload",
         "release_policies",

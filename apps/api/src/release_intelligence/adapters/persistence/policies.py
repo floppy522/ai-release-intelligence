@@ -45,6 +45,13 @@ class PolicyRepository:
         expected_version: int | None,
     ) -> PolicyRecord:
         try:
+            canonical_policy = ReleasePolicy.model_validate(
+                policy.model_dump(mode="json")
+            )
+            canonical_payload = canonical_policy.model_dump(mode="json")
+        except (ValidationError, PolicyValidationError, TypeError, ValueError):
+            raise PolicyPersistenceError() from None
+        try:
             async with self._sessions() as session, session.begin():
                 repository = await session.scalar(
                     select(RepositoryConnectionRow)
@@ -68,7 +75,7 @@ class PolicyRepository:
                     repository_id=repository.id,
                     version=f"configuration:{next_version}",
                     configuration_version=next_version,
-                    policy_payload=policy.model_dump(mode="json"),
+                    policy_payload=canonical_payload,
                 )
                 session.add(row)
                 await session.flush()

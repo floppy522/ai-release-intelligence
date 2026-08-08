@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 
 class PolicyValidationError(Exception):
@@ -32,12 +34,32 @@ class ReleasePolicy(BaseModel):
     code_change_label: str
     release_ops_label: str
     blocker_label: str
-    check_categories: dict[str, CheckCategory]
+    check_categories: Mapping[str, CheckCategory]
     previous_milestone_number: int | None = Field(default=None, gt=0)
     previous_release_branch: str | None = None
 
+    @field_serializer("check_categories")
+    def serialize_check_categories(
+        self, categories: Mapping[str, CheckCategory]
+    ) -> dict[str, str]:
+        return {name: category.value for name, category in categories.items()}
+
     @model_validator(mode="after")
     def validate_invariants(self) -> Self:
+        canonical_strings = {
+            "main_branch": self.main_branch.strip(),
+            "candidate_branch": self.candidate_branch.strip(),
+            "code_change_label": self.code_change_label.strip(),
+            "release_ops_label": self.release_ops_label.strip(),
+            "blocker_label": self.blocker_label.strip(),
+        }
+        if self.previous_release_branch is not None:
+            canonical_strings["previous_release_branch"] = (
+                self.previous_release_branch.strip()
+            )
+        for field_name, value in canonical_strings.items():
+            object.__setattr__(self, field_name, value)
+
         required_names = {
             "main_branch": self.main_branch,
             "candidate_branch": self.candidate_branch,
@@ -57,13 +79,48 @@ class ReleasePolicy(BaseModel):
         if len(set(labels)) != len(labels):
             raise PolicyValidationError("issue type and blocker labels must be distinct")
 
-        if any(not check_name.strip() for check_name in self.check_categories):
-            raise PolicyValidationError("check names must not be blank")
+        normalized_checks: dict[str, CheckCategory] = {}
+        for raw_name, category in self.check_categories.items():
+            check_name = raw_name.strip()
+            if not check_name:
+                raise PolicyValidationError("check names must not be blank")
+            if len(check_name) > 255:
+                raise PolicyValidationError("check names must not exceed 255 characters")
+            if check_name in normalized_checks:
+                raise PolicyValidationError("duplicate check names after normalization")
+            normalized_checks[check_name] = category
+        if len(normalized_checks) > 100:
+            raise PolicyValidationError("at most 100 checks may be configured")
+        object.__setattr__(
+            self,
+            "check_categories",
+            MappingProxyType(dict(sorted(normalized_checks.items()))),
+        )
+
         self._validate_release_branch(self.candidate_branch, "candidate_branch")
+        if self.candidate_branch == self.main_branch:
+            raise PolicyValidationError("candidate branch must differ from main branch")
+        has_previous_milestone = self.previous_milestone_number is not None
+        has_previous_branch = self.previous_release_branch is not None
+        if has_previous_milestone != has_previous_branch:
+            raise PolicyValidationError(
+                "previous milestone and branch must be configured together"
+            )
         if self.previous_release_branch is not None:
             self._validate_release_branch(
                 self.previous_release_branch, "previous_release_branch"
             )
+            if self.previous_milestone_number == self.milestone_number:
+                raise PolicyValidationError(
+                    "previous milestone must differ from current milestone"
+                )
+            if self.previous_release_branch in {
+                self.candidate_branch,
+                self.main_branch,
+            }:
+                raise PolicyValidationError(
+                    "previous branch must differ from candidate and main branches"
+                )
         return self
 
     @staticmethod

@@ -1,7 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 
-import { getReleasePolicy, putReleasePolicy } from "../../api/client";
+import {
+  ApiError,
+  getReleasePolicy,
+  putReleasePolicy,
+} from "../../api/client";
 import type {
   CheckCategory,
   PolicyRecord,
@@ -27,27 +31,39 @@ export function ReleaseSetup({
   csrfToken,
   discoveredChecks,
 }: ReleaseSetupProps) {
+  const queryClient = useQueryClient();
+  const validRepositoryId = /^[1-9]\d*$/.test(repositoryId);
   const query = useQuery({
     queryKey: ["release-policy", repositoryId],
     queryFn: () => getReleasePolicy(repositoryId),
+    enabled: validRepositoryId,
   });
+
+  if (!validRepositoryId) {
+    return <p role="alert">Repository ID is invalid.</p>;
+  }
 
   if (query.isPending) return <p>Loading release policy…</p>;
   if (query.isError) return <p role="alert">Could not load release policy.</p>;
 
   return (
     <PolicyForm
-      key={query.data?.version ?? 0}
       repositoryId={repositoryId}
       csrfToken={csrfToken}
       discoveredChecks={discoveredChecks}
       initial={query.data}
+      onSaved={(record) =>
+        queryClient.setQueryData(["release-policy", repositoryId], record)
+      }
+      reload={async () => (await query.refetch()).data ?? null}
     />
   );
 }
 
 interface PolicyFormProps extends ReleaseSetupProps {
   initial: PolicyRecord | null;
+  onSaved: (record: PolicyRecord) => void;
+  reload: () => Promise<PolicyRecord | null>;
 }
 
 function PolicyForm({
@@ -55,8 +71,13 @@ function PolicyForm({
   csrfToken,
   discoveredChecks,
   initial,
+  onSaved,
+  reload,
 }: PolicyFormProps) {
   const policy = initial?.policy;
+  const allChecks = Array.from(
+    new Set([...discoveredChecks, ...Object.keys(policy?.check_categories ?? {})]),
+  ).sort();
   const [mainBranch, setMainBranch] = useState(policy?.main_branch ?? "");
   const [candidateBranch, setCandidateBranch] = useState(
     policy?.candidate_branch ?? "",
@@ -85,7 +106,7 @@ function PolicyForm({
     Record<string, CheckSelection>
   >(() =>
     Object.fromEntries(
-      discoveredChecks.map((check) => [
+      allChecks.map((check) => [
         check,
         policy?.check_categories[check] ?? "",
       ]),
@@ -97,11 +118,40 @@ function PolicyForm({
   const [requiredError, setRequiredError] = useState(false);
   const [checksError, setChecksError] = useState(false);
   const [saveError, setSaveError] = useState(false);
+  const [saveMessage, setSaveMessage] = useState("");
   const [savedVersion, setSavedVersion] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  function applyRecord(record: PolicyRecord) {
+    const canonical = record.policy;
+    setMainBranch(canonical.main_branch);
+    setCandidateBranch(canonical.candidate_branch);
+    setMilestoneNumber(String(canonical.milestone_number));
+    setCodeChangeLabel(canonical.code_change_label);
+    setReleaseOpsLabel(canonical.release_ops_label);
+    setBlockerLabel(canonical.blocker_label);
+    setPreviousMilestone(
+      canonical.previous_milestone_number === null
+        ? ""
+        : String(canonical.previous_milestone_number),
+    );
+    setPreviousReleaseBranch(canonical.previous_release_branch ?? "");
+    setCheckCategories(
+      Object.fromEntries(
+        Array.from(
+          new Set([...allChecks, ...Object.keys(canonical.check_categories)]),
+        )
+          .sort()
+          .map((check) => [check, canonical.check_categories[check] ?? ""]),
+      ),
+    );
+    setExpectedVersion(record.version);
+  }
 
   async function savePolicy(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSaveError(false);
+    setSaveMessage("");
     setSavedVersion(null);
     const requiredMissing = [
       milestoneNumber,
@@ -111,15 +161,33 @@ function PolicyForm({
       releaseOpsLabel,
       blockerLabel,
     ].some((value) => value.trim() === "");
-    const unclassified = discoveredChecks.some(
+    const unclassified = allChecks.some(
       (check) => !checkCategories[check],
     );
+    const semanticError = requiredMissing
+      ? ""
+      : validatePolicyFields({
+          mainBranch,
+          candidateBranch,
+          milestoneNumber,
+          codeChangeLabel,
+          releaseOpsLabel,
+          blockerLabel,
+          previousMilestone,
+          previousReleaseBranch,
+        });
     setRequiredError(requiredMissing);
     setChecksError(unclassified);
-    if (requiredMissing || unclassified) return;
+    if (requiredMissing || unclassified || semanticError) {
+      if (semanticError) {
+        setSaveError(true);
+        setSaveMessage(semanticError);
+      }
+      return;
+    }
 
     const categories = Object.fromEntries(
-      discoveredChecks.map((check) => [check, checkCategories[check]]),
+      allChecks.map((check) => [check, checkCategories[check]]),
     ) as Record<string, CheckCategory>;
     const payload: PolicyUpsertPayload = {
       main_branch: mainBranch.trim(),
@@ -128,7 +196,7 @@ function PolicyForm({
       code_change_label: codeChangeLabel.trim(),
       release_ops_label: releaseOpsLabel.trim(),
       blocker_label: blockerLabel.trim(),
-      discovered_checks: discoveredChecks,
+      discovered_checks: allChecks,
       check_categories: categories,
       previous_milestone_number: previousMilestone
         ? Number(previousMilestone)
@@ -136,12 +204,25 @@ function PolicyForm({
       previous_release_branch: previousReleaseBranch.trim() || null,
       expected_version: expectedVersion,
     };
+    setSaving(true);
     try {
       const saved = await putReleasePolicy(repositoryId, payload, csrfToken);
-      setExpectedVersion(saved.version);
+      applyRecord(saved);
+      onSaved(saved);
       setSavedVersion(saved.version);
-    } catch {
+    } catch (error) {
       setSaveError(true);
+      if (error instanceof ApiError && error.status === 409) {
+        const latest = await reload();
+        if (latest) applyRecord(latest);
+        setSaveMessage("Policy changed. Latest version reloaded.");
+      } else if (error instanceof ApiError && error.status === 422) {
+        setSaveMessage("Review the policy fields and try again.");
+      } else {
+        setSaveMessage("Could not save policy. Reload and try again.");
+      }
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -160,6 +241,8 @@ function PolicyForm({
           min="1"
           value={milestoneNumber}
           onChange={(event) => setMilestoneNumber(event.target.value)}
+          aria-invalid={requiredError || saveError}
+          aria-describedby="policy-error"
         />
       </label>
       <label>
@@ -167,6 +250,8 @@ function PolicyForm({
         <input
           value={mainBranch}
           onChange={(event) => setMainBranch(event.target.value)}
+          aria-invalid={requiredError || saveError}
+          aria-describedby="policy-error"
         />
       </label>
       <label>
@@ -175,6 +260,8 @@ function PolicyForm({
           placeholder="release/YYYY-MM-DD"
           value={candidateBranch}
           onChange={(event) => setCandidateBranch(event.target.value)}
+          aria-invalid={requiredError || saveError}
+          aria-describedby="policy-error"
         />
       </label>
 
@@ -185,6 +272,8 @@ function PolicyForm({
           <input
             value={codeChangeLabel}
             onChange={(event) => setCodeChangeLabel(event.target.value)}
+            aria-invalid={requiredError || saveError}
+            aria-describedby="policy-error"
           />
         </label>
         <label>
@@ -192,6 +281,8 @@ function PolicyForm({
           <input
             value={releaseOpsLabel}
             onChange={(event) => setReleaseOpsLabel(event.target.value)}
+            aria-invalid={requiredError || saveError}
+            aria-describedby="policy-error"
           />
         </label>
         <label>
@@ -199,13 +290,15 @@ function PolicyForm({
           <input
             value={blockerLabel}
             onChange={(event) => setBlockerLabel(event.target.value)}
+            aria-invalid={requiredError || saveError}
+            aria-describedby="policy-error"
           />
         </label>
       </fieldset>
 
       <fieldset>
         <legend>Discovered checks</legend>
-        {discoveredChecks.map((check) => (
+        {allChecks.map((check) => (
           <label key={check}>
             {check} category
             <select
@@ -216,6 +309,8 @@ function PolicyForm({
                   [check]: event.target.value as CheckSelection,
                 }))
               }
+              aria-invalid={checksError}
+              aria-describedby="policy-error"
             >
               <option value="">Choose category</option>
               {CHECK_OPTIONS.map((category) => (
@@ -237,6 +332,8 @@ function PolicyForm({
             min="1"
             value={previousMilestone}
             onChange={(event) => setPreviousMilestone(event.target.value)}
+            aria-invalid={saveError}
+            aria-describedby="policy-error"
           />
         </label>
         <label>
@@ -245,23 +342,81 @@ function PolicyForm({
             placeholder="release/YYYY-MM-DD"
             value={previousReleaseBranch}
             onChange={(event) => setPreviousReleaseBranch(event.target.value)}
+            aria-invalid={saveError}
+            aria-describedby="policy-error"
           />
         </label>
       </fieldset>
 
       {requiredError ? (
-        <p role="alert">Enter the required release fields</p>
+        <p id="policy-error" role="alert">Enter the required release fields</p>
       ) : null}
       {checksError ? (
-        <p role="alert">Classify every discovered check</p>
+        <p id={requiredError ? undefined : "policy-error"} role="alert">
+          Classify every discovered check
+        </p>
       ) : null}
       {saveError ? (
-        <p role="alert">Could not save policy. Reload and try again.</p>
+        <p id={requiredError || checksError ? undefined : "policy-error"} role="alert">
+          {saveMessage}
+        </p>
       ) : null}
       {savedVersion === null ? null : (
         <p role="status">Policy version {savedVersion} saved</p>
       )}
-      <button type="submit">Save policy</button>
+      <button type="submit" disabled={saving}>
+        {saving ? "Saving…" : "Save policy"}
+      </button>
     </form>
   );
+}
+
+interface PolicyFieldValues {
+  mainBranch: string;
+  candidateBranch: string;
+  milestoneNumber: string;
+  codeChangeLabel: string;
+  releaseOpsLabel: string;
+  blockerLabel: string;
+  previousMilestone: string;
+  previousReleaseBranch: string;
+}
+
+function validatePolicyFields(values: PolicyFieldValues): string {
+  const main = values.mainBranch.trim();
+  const candidate = values.candidateBranch.trim();
+  if (!validReleaseBranch(candidate) || candidate === main) {
+    return "Use a valid candidate release branch distinct from main.";
+  }
+  const labels = [
+    values.codeChangeLabel,
+    values.releaseOpsLabel,
+    values.blockerLabel,
+  ].map((label) => label.trim().toLocaleLowerCase());
+  if (new Set(labels).size !== labels.length) {
+    return "Use three distinct issue labels.";
+  }
+  const hasPreviousMilestone = values.previousMilestone.trim() !== "";
+  const previousBranch = values.previousReleaseBranch.trim();
+  const hasPreviousBranch = previousBranch !== "";
+  if (hasPreviousMilestone !== hasPreviousBranch) {
+    return "Configure both previous-release fields or leave both empty.";
+  }
+  if (
+    hasPreviousBranch &&
+    (!validReleaseBranch(previousBranch) ||
+      previousBranch === candidate ||
+      previousBranch === main ||
+      Number(values.previousMilestone) === Number(values.milestoneNumber))
+  ) {
+    return "Use distinct previous-release milestone and branch values.";
+  }
+  return "";
+}
+
+function validReleaseBranch(branch: string): boolean {
+  const match = /^release\/(\d{4}-\d{2}-\d{2})$/.exec(branch);
+  if (!match) return false;
+  const date = new Date(`${match[1]}T00:00:00Z`);
+  return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === match[1];
 }

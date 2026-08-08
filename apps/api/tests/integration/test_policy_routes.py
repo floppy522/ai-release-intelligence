@@ -58,11 +58,15 @@ class FakeAuthStore:
     async def find_repository_access(
         self, user_id: str, repository_id: str
     ) -> AuthorizedRepository | None:
-        if (
-            not self.allow_repository
-            or user_id != "github:7"
-            or repository_id != REPOSITORY_ID
-        ):
+        if not self.allow_repository or user_id != "github:7":
+            return None
+        if repository_id == "example/release-intelligence":
+            return AuthorizedRepository(
+                repository_id=REPOSITORY_ID,
+                full_name="example/release-intelligence",
+                installation_id=123,
+            )
+        if repository_id != REPOSITORY_ID:
             return None
         return AuthorizedRepository(
             repository_id=REPOSITORY_ID,
@@ -234,3 +238,40 @@ async def test_get_missing_policy_is_404_and_database_failures_are_503(
     assert missing.json() == {"detail": "Release policy was not found"}
     assert unavailable.status_code == 503
     assert unavailable.json() == {"detail": "Policy persistence unavailable"}
+
+
+async def test_numeric_policy_route_does_not_shadow_repository_name_route(
+    auth_store: FakeAuthStore, policy_store: MemoryPolicyStore
+) -> None:
+    async with await request_client(auth_store, policy_store) as client:
+        repository = await client.get(
+            "/api/repositories/example/release-intelligence"
+        )
+        noncanonical = await client.get(
+            f"/api/repositories/00{REPOSITORY_ID}/policy"
+        )
+        zero = await client.get("/api/repositories/0/policy")
+
+    assert repository.status_code == 200
+    assert repository.json()["repository_id"] == REPOSITORY_ID
+    assert noncanonical.status_code == 422
+    assert noncanonical.json() == {"detail": "Repository ID is invalid"}
+    assert zero.status_code == 422
+    assert zero.json() == {"detail": "Repository ID is invalid"}
+
+
+async def test_duplicate_discovered_checks_return_sanitized_422(
+    auth_store: FakeAuthStore, policy_store: MemoryPolicyStore
+) -> None:
+    async with await request_client(auth_store, policy_store) as client:
+        response = await client.put(
+            f"/api/repositories/{REPOSITORY_ID}/policy",
+            json={
+                **POLICY_PAYLOAD,
+                "discovered_checks": ["api", " api "],
+                "expected_version": None,
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Release policy request is invalid"}
