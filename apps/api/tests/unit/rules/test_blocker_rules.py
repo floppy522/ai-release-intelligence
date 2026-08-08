@@ -177,6 +177,25 @@ def test_unknown_release_labeled_state_is_typed_insufficiency() -> None:
     assert raised.value.codes == ("issue.invalid_state:41",)
 
 
+def test_invalid_kind_quarantines_matching_coordinate_but_preserves_others() -> None:
+    malformed = replace(_issue(41), kind=cast(GitHubItemKind, "unknown"))
+    unrelated = _issue(42)
+    expected: tuple[object, ...] | None = None
+
+    for ordering in permutations((_issue(41), malformed, unrelated)):
+        with pytest.raises(BlockerEvidenceError) as raised:
+            evaluate_blockers(_snapshot(*ordering), POLICY)
+        outcome = (raised.value.findings, raised.value.codes)
+        if expected is None:
+            expected = outcome
+        assert outcome == expected
+
+    assert expected is not None
+    findings, codes = expected
+    assert [finding.evidence[0].source_id for finding in findings] == ["420"]
+    assert codes == ("issue.invalid_kind:41",)
+
+
 @pytest.mark.parametrize(
     ("corrupt", "expected_code"),
     [
@@ -227,7 +246,12 @@ def test_malformed_issue_evidence_is_bounded_typed_insufficiency(
     with pytest.raises(BlockerEvidenceError) as raised:
         evaluate_blockers(_snapshot(corrupt(_issue())), POLICY)
 
-    assert raised.value.findings == ()
+    if expected_code in {"issue.invalid_assignees:41", "issue.invalid_body:41"}:
+        assert [finding.rule_id for finding in raised.value.findings] == [
+            "blockers.open_release_blocker"
+        ]
+    else:
+        assert raised.value.findings == ()
     if expected_code.endswith(":"):
         assert len(raised.value.codes) == 1
         assert raised.value.codes[0].startswith(expected_code)

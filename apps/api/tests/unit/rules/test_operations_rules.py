@@ -313,6 +313,48 @@ def test_rendering_empty_or_decorated_placeholders_do_not_satisfy_sections(
     assert [finding.rule_id for finding in findings] == ["operations.section_required"]
 
 
+@pytest.mark.parametrize(
+    "template_only",
+    [
+        "---",
+        "- ---",
+        "**---**",
+        "* * *",
+        "_ _ _",
+        "- [ ] task",
+        "* [ ] task",
+        "+ [ ] task",
+        "1. [ ] task",
+        "1) [ ] task",
+    ],
+)
+def test_horizontal_rules_and_all_unchecked_list_markers_are_not_content(
+    template_only: str,
+) -> None:
+    body = COMPLETE_BODY.replace("Confirm the backup.", template_only)
+
+    findings = evaluate_operations(_snapshot(_issue(body=body)), POLICY)
+
+    assert [finding.rule_id for finding in findings] == ["operations.section_required"]
+
+
+@pytest.mark.parametrize(
+    "real_content",
+    [
+        "---\nDeploy the canary.",
+        "+ [x] Backup confirmed.",
+        "1. Verify the smoke tests.",
+        "1234567890. Verify the unusually numbered step.",
+    ],
+)
+def test_markdown_presentation_does_not_hide_real_section_content(
+    real_content: str,
+) -> None:
+    body = COMPLETE_BODY.replace("Confirm the backup.", real_content)
+
+    assert evaluate_operations(_snapshot(_issue(body=body)), POLICY) == ()
+
+
 def test_substring_heading_is_not_a_structured_field() -> None:
     body = COMPLETE_BODY.replace("### Before release", "### Before release notes")
 
@@ -369,6 +411,93 @@ def test_duplicate_heading_error_preserves_missing_owner_finding() -> None:
         "operations.owner_required"
     ]
     assert raised.value.codes == ("operations.conflicting_fields:51",)
+
+
+def test_conflicting_heading_preserves_independently_missing_section() -> None:
+    body = (
+        COMPLETE_BODY.replace("### After release\nVerify service health.", "")
+        + "\n\n### Before release\nConflicting value."
+    )
+
+    with pytest.raises(OperationsEvidenceError) as raised:
+        evaluate_operations(_snapshot(_issue(body=body)), POLICY)
+
+    assert [finding.summary for finding in raised.value.findings] == [
+        "Release operations Issue #51 lacks 'After release'"
+    ]
+    assert raised.value.codes == ("operations.conflicting_fields:51",)
+
+
+def test_conflicting_heading_preserves_unambiguous_migration_finding() -> None:
+    body = (
+        COMPLETE_BODY
+        + "\n\n### Before release\nConflicting value."
+        + f"\n\n### Migration evidence\n{CHECK_URL}"
+    )
+
+    with pytest.raises(OperationsEvidenceError) as raised:
+        evaluate_operations(
+            _snapshot(_issue(body=body), checks=(_check(conclusion="failure"),)),
+            POLICY,
+        )
+
+    assert [finding.rule_id for finding in raised.value.findings] == [
+        "operations.migration_evidence_required"
+    ]
+    assert raised.value.codes == ("operations.conflicting_fields:51",)
+
+
+def test_invalid_body_preserves_independent_missing_owner_finding() -> None:
+    with pytest.raises(OperationsEvidenceError) as raised:
+        evaluate_operations(_snapshot(_issue(body="x" * 65_537, assignees=())), POLICY)
+
+    assert [finding.rule_id for finding in raised.value.findings] == [
+        "operations.owner_required"
+    ]
+    assert raised.value.codes == ("issue.invalid_body:51",)
+
+
+def test_invalid_assignees_preserve_independent_section_findings() -> None:
+    body = COMPLETE_BODY.replace("### Before release", "### Other field")
+
+    with pytest.raises(OperationsEvidenceError) as raised:
+        evaluate_operations(
+            _snapshot(_issue(body=body, assignees=("x" * 256,))), POLICY
+        )
+
+    assert [finding.rule_id for finding in raised.value.findings] == [
+        "operations.section_required"
+    ]
+    assert raised.value.codes == ("operations.invalid_owner:51",)
+
+
+def test_field_quarantine_findings_and_codes_are_permutation_stable() -> None:
+    invalid_body = _issue(51, body="x" * 65_537, assignees=())
+    conflicting_body = (
+        COMPLETE_BODY.replace("### After release\nVerify service health.", "")
+        + "\n\n### Before release\nConflicting value."
+    )
+    conflicting_field = _issue(52, body=conflicting_body)
+    expected: tuple[object, ...] | None = None
+
+    for item_order in permutations((invalid_body, conflicting_field)):
+        with pytest.raises(OperationsEvidenceError) as raised:
+            evaluate_operations(_snapshot(*item_order), POLICY)
+        outcome = (raised.value.findings, raised.value.codes)
+        if expected is None:
+            expected = outcome
+        assert outcome == expected
+
+    assert expected is not None
+    findings, codes = expected
+    assert [finding.rule_id for finding in findings] == [
+        "operations.owner_required",
+        "operations.section_required",
+    ]
+    assert codes == (
+        "issue.invalid_body:51",
+        "operations.conflicting_fields:52",
+    )
 
 
 @pytest.mark.parametrize(

@@ -41,10 +41,14 @@ _HTML_BLOCK = re.compile(
     r"nav|ol|p|pre|script|section|style|summary|table|ul)(?:[ \t>/]|$)",
     re.IGNORECASE,
 )
-_UNCHECKED = re.compile(r"(?m)^[ \t]*[-*][ \t]+\[[ \t]\]")
+_LIST_PREFIX = r"[ ]{0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+"
+_UNCHECKED = re.compile(rf"(?m)^{_LIST_PREFIX}\[[ \t]\](?:[ \t]|$)")
 _HTML_COMMENT = re.compile(r"(?s)<!--.*?-->")
 _HTML_TAG = re.compile(r"(?s)<[^>]*>")
-_LIST_MARKER = re.compile(r"(?m)^[ \t]*(?:[-*+]|\d+[.)])[ \t]+")
+_HORIZONTAL_RULE = re.compile(
+    r"(?m)^[ ]{0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"
+)
+_LIST_MARKER = re.compile(rf"(?m)^{_LIST_PREFIX}")
 _PRESENTATION = re.compile(r"[*_~`]+")
 _PLACEHOLDERS = frozenset(
     {
@@ -84,6 +88,9 @@ def evaluate_operations(
         f"operations.invalid_owner:{number}"
         for number in evidence.invalid_owner_numbers
     )
+    codes.extend(
+        f"issue.invalid_body:{number}" for number in evidence.invalid_body_numbers
+    )
     for item in evidence.items:
         if (
             item.state != "open"
@@ -96,6 +103,7 @@ def evaluate_operations(
             snapshot,
             item,
             owner_valid=item.number not in evidence.invalid_owner_numbers,
+            body_valid=item.number not in evidence.invalid_body_numbers,
         )
         findings.extend(item_findings)
         codes.extend(item_codes)
@@ -111,6 +119,7 @@ def _evaluate_item(
     item: GitHubItem,
     *,
     owner_valid: bool,
+    body_valid: bool,
 ) -> tuple[tuple[ReadinessFinding, ...], tuple[str, ...]]:
     issue_evidence = (_issue_evidence(snapshot, item),)
     findings: list[ReadinessFinding] = []
@@ -125,13 +134,14 @@ def _evaluate_item(
             )
         )
 
-    sections, parse_codes = _parse_sections(item)
-    codes.extend(parse_codes)
-    if parse_codes:
+    if not body_valid:
         return tuple(findings), tuple(codes)
 
+    sections, conflicts, parse_codes = _parse_sections(item)
+    codes.extend(parse_codes)
+
     for section in _REQUIRED_SECTIONS:
-        if not _valid_section(sections.get(section)):
+        if section not in conflicts and not _valid_section(sections.get(section)):
             findings.append(
                 _finding(
                     "operations.section_required",
@@ -142,7 +152,7 @@ def _evaluate_item(
             )
 
     migration = sections.get("Migration evidence")
-    if migration is not None:
+    if migration is not None and "Migration evidence" not in conflicts:
         migration_findings, migration_codes = _evaluate_migration(
             snapshot, item, migration
         )
@@ -153,9 +163,9 @@ def _evaluate_item(
 
 def _parse_sections(
     item: GitHubItem,
-) -> tuple[dict[str, str], tuple[str, ...]]:
+) -> tuple[dict[str, str], frozenset[str], tuple[str, ...]]:
     if not isinstance(item.body, str) or len(item.body) > 65_536:
-        return {}, (f"operations.invalid_body:{item.number}",)
+        return {}, frozenset(_FIELDS), (f"operations.invalid_body:{item.number}",)
 
     values: dict[str, dict[str, str]] = {field: {} for field in _FIELDS}
     current: str | None = None
@@ -231,13 +241,16 @@ def _parse_sections(
             buffer.append(line)
     finish()
 
-    if any(len(candidates) > 1 for candidates in values.values()):
-        return {}, (f"operations.conflicting_fields:{item.number}",)
-    return {
+    conflicts = frozenset(
+        field for field, candidates in values.items() if len(candidates) > 1
+    )
+    sections = {
         field: next(iter(candidates.values()))
         for field, candidates in values.items()
-        if candidates
-    }, ()
+        if len(candidates) == 1
+    }
+    codes = (f"operations.conflicting_fields:{item.number}",) if conflicts else ()
+    return sections, conflicts, codes
 
 
 def _normalize_field_value(lines: list[str]) -> str:
@@ -277,6 +290,7 @@ def _visible_text(value: str) -> str:
     visible = _HTML_TAG.sub(" ", visible)
     visible = _LIST_MARKER.sub("", visible)
     visible = _PRESENTATION.sub("", visible)
+    visible = _HORIZONTAL_RULE.sub(" ", visible)
     return " ".join(visible.split())
 
 

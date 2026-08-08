@@ -5,7 +5,7 @@ import json
 import re
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from release_intelligence.domain.models import ReadinessFinding, ReleaseSnapshot
@@ -41,6 +41,7 @@ class BlockerEvidenceError(Exception):
 class _IssueEvidenceState:
     items: tuple[GitHubItem, ...]
     invalid_owner_numbers: frozenset[int]
+    invalid_body_numbers: frozenset[int]
     codes: tuple[str, ...]
 
 
@@ -71,6 +72,11 @@ def evaluate_blockers(
         for item in evidence.items
         if item.number in evidence.invalid_owner_numbers
     )
+    codes.extend(
+        f"issue.invalid_body:{item.number}"
+        for item in evidence.items
+        if item.number in evidence.invalid_body_numbers
+    )
     if codes:
         raise BlockerEvidenceError(findings=findings, codes=codes)
     return findings
@@ -78,11 +84,14 @@ def evaluate_blockers(
 
 def _analyze_issue_evidence(snapshot: ReleaseSnapshot) -> _IssueEvidenceState:
     grouped: defaultdict[int, list[GitHubItem]] = defaultdict(list)
+    invalid_kind_numbers: set[int] = set()
     codes: list[str] = []
     for item in snapshot.items:
         if not isinstance(item.kind, GitHubItemKind):
             coordinate = _issue_coordinate(item.number)
             codes.append(f"issue.invalid_kind:{coordinate}")
+            if _is_issue_number(item.number):
+                invalid_kind_numbers.add(item.number)
             continue
         if not _is_issue_number(item.number):
             if item.kind is GitHubItemKind.ISSUE:
@@ -94,8 +103,11 @@ def _analyze_issue_evidence(snapshot: ReleaseSnapshot) -> _IssueEvidenceState:
 
     valid: list[GitHubItem] = []
     invalid_owners: set[int] = set()
+    invalid_bodies: set[int] = set()
     for number, raw_candidates in sorted(grouped.items()):
         if not any(item.kind is GitHubItemKind.ISSUE for item in raw_candidates):
+            continue
+        if number in invalid_kind_numbers:
             continue
         if any(item.kind is not GitHubItemKind.ISSUE for item in raw_candidates):
             codes.append(f"issue.conflicting_records:{number}")
@@ -104,14 +116,23 @@ def _analyze_issue_evidence(snapshot: ReleaseSnapshot) -> _IssueEvidenceState:
         candidates: dict[str, GitHubItem] = {}
         candidate_codes: list[str] = []
         candidate_invalid_owner = False
+        candidate_invalid_body = False
         for item in raw_candidates:
-            fatal_codes, invalid_owner = _validate_issue(snapshot, item)
+            fatal_codes, invalid_owner, invalid_body = _validate_issue(snapshot, item)
             candidate_codes.extend(fatal_codes)
             candidate_invalid_owner = candidate_invalid_owner or invalid_owner
+            candidate_invalid_body = candidate_invalid_body or invalid_body
             if fatal_codes:
                 continue
-            key = json.dumps(_item_facts(item), sort_keys=True, separators=(",", ":"))
-            candidates[key] = item
+            safe_item = replace(
+                item,
+                assignees=() if invalid_owner else item.assignees,
+                body="" if invalid_body else item.body,
+            )
+            key = json.dumps(
+                _item_facts(safe_item), sort_keys=True, separators=(",", ":")
+            )
+            candidates[key] = safe_item
         if candidate_codes:
             codes.extend(candidate_codes)
             continue
@@ -121,16 +142,19 @@ def _analyze_issue_evidence(snapshot: ReleaseSnapshot) -> _IssueEvidenceState:
         valid.append(next(iter(candidates.values())))
         if candidate_invalid_owner:
             invalid_owners.add(number)
+        if candidate_invalid_body:
+            invalid_bodies.add(number)
     return _IssueEvidenceState(
         items=tuple(valid),
         invalid_owner_numbers=frozenset(invalid_owners),
+        invalid_body_numbers=frozenset(invalid_bodies),
         codes=tuple(sorted(set(codes))),
     )
 
 
 def _validate_issue(
     snapshot: ReleaseSnapshot, item: GitHubItem
-) -> tuple[tuple[str, ...], bool]:
+) -> tuple[tuple[str, ...], bool, bool]:
     number = item.number
     codes: list[str] = []
     if not _is_bounded_decimal(item.source_id):
@@ -150,10 +174,7 @@ def _validate_issue(
     if not _valid_strings(item.labels):
         codes.append(f"issue.invalid_labels:{number}")
     bounded_assignees = _bounded_strings(item.assignees)
-    if not bounded_assignees:
-        codes.append(f"issue.invalid_assignees:{number}")
-    if not isinstance(item.body, str) or len(item.body) > _MAX_BODY_LENGTH:
-        codes.append(f"issue.invalid_body:{number}")
+    invalid_body = not isinstance(item.body, str) or len(item.body) > _MAX_BODY_LENGTH
     if (
         not isinstance(item.url, str)
         or len(item.url) > _MAX_URL_LENGTH
@@ -162,10 +183,10 @@ def _validate_issue(
         )
     ):
         codes.append(f"issue.invalid_url:{number}")
-    invalid_owner = bounded_assignees and any(
+    invalid_owner = not bounded_assignees or any(
         _GITHUB_LOGIN.fullmatch(owner) is None for owner in item.assignees
     )
-    return tuple(sorted(set(codes))), invalid_owner
+    return tuple(sorted(set(codes))), invalid_owner, invalid_body
 
 
 def _valid_timestamps(snapshot: ReleaseSnapshot, item: GitHubItem) -> bool:
