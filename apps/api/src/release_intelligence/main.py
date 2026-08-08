@@ -23,6 +23,7 @@ from release_intelligence.api.dependencies import (
     SessionContext,
 )
 from release_intelligence.api.routes.auth import router as auth_router
+from release_intelligence.api.routes.decisions import router as decisions_router
 from release_intelligence.api.routes.releases import router as releases_router
 from release_intelligence.api.routes.repositories import router as repositories_router
 from release_intelligence.api.schemas import AssessmentResponse
@@ -33,6 +34,7 @@ from release_intelligence.application.analyze_release import (
     ReleaseLoader,
     assess_fixture_release,
 )
+from release_intelligence.application.decisions import DecisionService, DecisionStore
 from release_intelligence.config import AppSettings
 from release_intelligence.domain.models import ReadinessAssessment
 from release_intelligence.ports.auth import AuthPersistenceError
@@ -112,6 +114,7 @@ def create_app(
     oauth_state_ttl_seconds: int = DEFAULT_OAUTH_STATE_TTL_SECONDS,
     configure_auth: bool = True,
     analysis_service: AnalysisService | None = None,
+    decision_service: DecisionService | None = None,
     analysis_repository_factory: AnalysisRepositoryFactory = _analysis_repository,
     policy_store: PolicyRepositoryPort | None = None,
     policy_repository_factory: PolicyRepositoryFactory = _policy_repository,
@@ -129,6 +132,7 @@ def create_app(
         owned_policy_repository: ManagedPolicyRepository | None = None
         configuration = settings
         configured_analysis_service = analysis_service
+        configured_decision_service = decision_service
         configured_policy_store = policy_store
         try:
             install_access_log_redaction()
@@ -190,6 +194,11 @@ def create_app(
                         repository=owned_analysis_repository,
                         clock=effective_clock,
                     )
+                if configured_decision_service is None and owned_analysis_repository:
+                    configured_decision_service = DecisionService(
+                        clock=effective_clock,
+                        store=cast(DecisionStore, owned_analysis_repository),
+                    )
                 if configured_policy_store is None:
                     owned_policy_repository = policy_repository_factory(
                         configuration.database_url.get_secret_value()
@@ -199,6 +208,7 @@ def create_app(
             application.state.oauth_gateway = gateway
             application.state.credential_cipher = credential_cipher
             application.state.analysis_service = configured_analysis_service
+            application.state.decision_service = configured_decision_service
             application.state.policy_store = configured_policy_store
             yield
         finally:
@@ -226,10 +236,12 @@ def create_app(
     application.state.session_ttl_seconds = session_ttl_seconds
     application.state.oauth_state_ttl_seconds = oauth_state_ttl_seconds
     application.state.analysis_service = analysis_service
+    application.state.decision_service = decision_service
     application.state.policy_store = policy_store
     application.include_router(repositories_router)
     application.include_router(auth_router)
     application.include_router(releases_router)
+    application.include_router(decisions_router)
 
     @application.middleware("http")
     async def enforce_csrf(

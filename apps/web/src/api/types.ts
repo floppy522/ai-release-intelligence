@@ -25,6 +25,33 @@ export interface ReadinessAssessment {
   findings: readonly ReadinessFinding[];
 }
 
+export type DecisionKind = "ACCEPTED_RISK" | "RELEASE_BLOCKER";
+
+export interface DecisionFinding extends ReadinessFinding {
+  finding_id: string;
+}
+
+export interface DecisionCreatePayload {
+  finding_id: string;
+  fingerprint: string;
+  decision: DecisionKind;
+  reason: string;
+}
+
+export interface HumanDecisionRecord {
+  id: string;
+  analysis_run_id: string;
+  finding_id: string;
+  fingerprint: string;
+  decision: DecisionKind;
+  reason: string;
+  actor_id: string;
+  decided_at: string;
+  supersedes_decision_id: string | null;
+  blocks_release: boolean;
+  assessment: ReadinessAssessment;
+}
+
 export type CheckCategory = "BLOCKING" | "ADVISORY" | "IGNORED";
 
 export interface ReleasePolicy {

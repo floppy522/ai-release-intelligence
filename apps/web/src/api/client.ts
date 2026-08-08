@@ -1,4 +1,6 @@
 import type {
+  DecisionCreatePayload,
+  HumanDecisionRecord,
   PolicyRecord,
   PolicyUpsertPayload,
   ReadinessAssessment,
@@ -51,4 +53,25 @@ export async function putReleasePolicy(
   );
   if (!response.ok) throw new ApiError(response.status);
   return (await response.json()) as PolicyRecord;
+}
+
+export async function recordDecision(
+  runId: string,
+  payload: DecisionCreatePayload,
+  csrfToken: string,
+): Promise<HumanDecisionRecord> {
+  const response = await fetch(
+    `/api/analyses/${encodeURIComponent(runId)}/decisions`,
+    {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRF-Token": csrfToken,
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!response.ok) throw new ApiError(response.status);
+  return (await response.json()) as HumanDecisionRecord;
 }

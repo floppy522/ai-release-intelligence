@@ -349,6 +349,11 @@ class HumanDecisionRow(Base):
     decision: Mapped[str] = mapped_column(String(32), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    decision_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    assessment_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    assessment_payload: Mapped[list[dict[str, object]]] = mapped_column(
+        JSONB, nullable=False
+    )
     decided_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
