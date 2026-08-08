@@ -22,6 +22,10 @@ from release_intelligence.ports.github import GitHubCheck
 
 _REPOSITORY_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
+_FINGERPRINT = re.compile(r"^sha256:[0-9a-f]{64}$")
+_MAX_OWNER_LENGTH = 39
+_MAX_REPOSITORY_LENGTH = 100
+_MAX_SIGNED_BIGINT = 2**63 - 1
 _STATUSES = frozenset(
     {"queued", "in_progress", "completed", "waiting", "requested", "pending"}
 )
@@ -96,6 +100,7 @@ class _DecisionState(StrEnum):
     ACCEPTED = "ACCEPTED"
     BLOCKER = "BLOCKER"
     CONFLICTING = "CONFLICTING"
+    INVALID = "INVALID"
 
 
 def evaluate_checks(
@@ -128,6 +133,8 @@ def evaluate_checks(
                     evidence = _with_code(
                         evidence, f"decision.conflicting:{check.run_id}"
                     )
+                elif decision is _DecisionState.INVALID:
+                    evidence = _with_code(evidence, f"decision.invalid:{check.run_id}")
                 elif decision is _DecisionState.NONE:
                     findings.append(_advisory_finding(snapshot, check, blocker=False))
                 elif decision is _DecisionState.BLOCKER:
@@ -260,11 +267,21 @@ def _with_code(evidence: _EvidenceState, code: str) -> _EvidenceState:
 def _decision_state(
     fingerprint: CheckFingerprint, decisions: Iterable[CheckDecision]
 ) -> _DecisionState:
-    outcomes = {
-        decision.blocks_release
-        for decision in decisions
-        if decision.fingerprint == fingerprint.value
-    }
+    outcomes: set[bool] = set()
+    for decision in decisions:
+        try:
+            decision_fingerprint = decision.fingerprint
+            blocks_release = decision.blocks_release
+        except (AttributeError, TypeError, ValueError):
+            return _DecisionState.INVALID
+        if (
+            type(decision_fingerprint) is not str
+            or _FINGERPRINT.fullmatch(decision_fingerprint) is None
+            or type(blocks_release) is not bool
+        ):
+            return _DecisionState.INVALID
+        if decision_fingerprint == fingerprint.value:
+            outcomes.add(blocks_release)
     if not outcomes:
         return _DecisionState.NONE
     if len(outcomes) > 1:
@@ -280,7 +297,7 @@ def _is_valid_identity(snapshot: ReleaseSnapshot, check: GitHubCheck) -> bool:
     return (
         isinstance(check.run_id, int)
         and not isinstance(check.run_id, bool)
-        and check.run_id > 0
+        and 0 < check.run_id <= _MAX_SIGNED_BIGINT
         and check.source_id == str(check.run_id)
         and _is_canonical_name(check.name)
         and check.head_sha == snapshot.candidate_sha
@@ -309,7 +326,13 @@ def _is_valid_matrix(snapshot: ReleaseSnapshot, check: GitHubCheck) -> bool:
     if started is not None and completed is not None and started > completed:
         return False
     if check.status == "completed":
-        return check.conclusion in _CONCLUSIONS and completed is not None
+        return (
+            check.conclusion in _CONCLUSIONS
+            and started is not None
+            and completed is not None
+        )
+    if check.status == "in_progress" and started is None:
+        return False
     return check.conclusion is None and completed is None
 
 
@@ -354,6 +377,8 @@ def _missing_blocking_finding(
         "check_name": check_name,
         "missing": True,
     }
+    digest = _digest(facts)
+    digest_value = digest.removeprefix("sha256:")
     return ReadinessFinding(
         rule_id="checks.blocking_not_successful",
         severity="BLOCKING",
@@ -361,14 +386,14 @@ def _missing_blocking_finding(
         required_action=f"Run blocking check '{check_name}' on the candidate commit",
         evidence=(
             EvidenceRef(
-                evidence_id=f"github-check-missing-{_digest(facts).removeprefix('sha256:')}",
+                evidence_id=f"github-check-missing-{digest_value}",
                 source_type="github_check_run",
-                source_id=f"missing:{check_name}",
+                source_id=f"missing:{digest_value}",
                 url=(
-                    f"https://github.com/{snapshot.repository_full_name}/tree/"
-                    f"{snapshot.candidate_sha}"
+                    f"https://github.com/{snapshot.repository_full_name}/commit/"
+                    f"{snapshot.candidate_sha}/checks"
                 ),
-                fingerprint=_digest(facts),
+                fingerprint=digest,
             ),
         ),
     )
@@ -437,11 +462,15 @@ def _is_repository_name(repository: object) -> bool:
     if not isinstance(repository, str):
         return False
     parts = repository.split("/")
-    return len(parts) == 2 and all(
-        bool(part)
-        and part not in {".", ".."}
-        and _REPOSITORY_PART.fullmatch(part) is not None
-        for part in parts
+    return (
+        len(repository) <= 255
+        and len(parts) == 2
+        and 0 < len(parts[0]) <= _MAX_OWNER_LENGTH
+        and 0 < len(parts[1]) <= _MAX_REPOSITORY_LENGTH
+        and all(
+            part not in {".", ".."} and _REPOSITORY_PART.fullmatch(part) is not None
+            for part in parts
+        )
     )
 
 
@@ -478,7 +507,7 @@ def _is_aware(value: object) -> bool:
 
 
 def _is_check_url(url: str, repository: str, run_id: int) -> bool:
-    return _is_canonical_github_url(url, f"/{repository}/actions/runs/{run_id}")
+    return _is_canonical_github_url(url, f"/{repository}/runs/{run_id}")
 
 
 def _is_canonical_github_url(url: object, expected_path: str) -> bool:

@@ -50,7 +50,7 @@ def _check(
         source_id=str(run_id),
         run_id=run_id,
         name=name,
-        url=f"https://github.com/acme/widgets/actions/runs/{run_id}",
+        url=f"https://github.com/acme/widgets/runs/{run_id}",
         head_sha=CANDIDATE_SHA,
         status=status,
         conclusion=conclusion,
@@ -88,6 +88,16 @@ class _Decision:
     blocks_release: bool
 
 
+class _ExplodingDecision:
+    @property
+    def fingerprint(self) -> str:
+        raise ValueError("untrusted decision")
+
+    @property
+    def blocks_release(self) -> bool:
+        raise ValueError("untrusted decision")
+
+
 @pytest.mark.parametrize(
     ("status", "conclusion"),
     [
@@ -117,6 +127,22 @@ def test_blocking_check_requires_completed_success(
 
 def test_completed_success_is_the_only_passing_blocking_state() -> None:
     assert evaluate_checks(_snapshot(_check()), _policy(), decisions=()) == ()
+
+
+def test_check_run_uses_the_check_runs_api_html_url() -> None:
+    check = replace(_check(), url="https://github.com/acme/widgets/runs/101")
+
+    assert evaluate_checks(_snapshot(check), _policy(), decisions=()) == ()
+
+
+def test_workflow_run_url_is_not_valid_check_run_evidence() -> None:
+    workflow_run = replace(
+        _check(), url="https://github.com/acme/widgets/actions/runs/101"
+    )
+    with pytest.raises(CheckEvidenceError) as raised:
+        evaluate_checks(_snapshot(workflow_run), _policy(), decisions=())
+
+    assert raised.value.codes == ("check.invalid_identity:101",)
 
 
 def test_unknown_successful_check_still_requires_classification() -> None:
@@ -179,7 +205,7 @@ def test_missing_configured_blocking_check_is_a_stable_blocker() -> None:
     assert first[0].blocks_release
     assert first[0].evidence == second[0].evidence
     assert first[0].evidence[0].url == (
-        f"https://github.com/acme/widgets/tree/{CANDIDATE_SHA}"
+        f"https://github.com/acme/widgets/commit/{CANDIDATE_SHA}/checks"
     )
 
 
@@ -275,6 +301,69 @@ def test_matching_blocker_decision_turns_advisory_into_a_blocker() -> None:
 
 
 @pytest.mark.parametrize(
+    "decision",
+    [
+        _Decision(fingerprint=cast(str, None), blocks_release=False),
+        _Decision(fingerprint=cast(str, 0), blocks_release=False),
+        _Decision(fingerprint="", blocks_release=False),
+        _Decision(
+            fingerprint=_security_fingerprint().value,
+            blocks_release=cast(bool, 0),
+        ),
+        _Decision(
+            fingerprint=_security_fingerprint().value,
+            blocks_release=cast(bool, ""),
+        ),
+        _ExplodingDecision(),
+    ],
+)
+def test_malformed_decision_is_typed_insufficiency(decision: object) -> None:
+    check = _check(name="security", conclusion="failure", run_id=201)
+    policy = _policy({"security": CheckCategory.ADVISORY})
+
+    with pytest.raises(CheckEvidenceError) as raised:
+        evaluate_checks(
+            _snapshot(check),
+            policy,
+            decisions=(cast(_Decision, decision),),
+        )
+
+    assert raised.value.codes == ("decision.invalid:201",)
+    assert raised.value.findings == ()
+
+
+def test_exact_duplicate_decisions_are_idempotent() -> None:
+    check = _check(name="security", conclusion="failure", run_id=201)
+    policy = _policy({"security": CheckCategory.ADVISORY})
+    decision = _Decision(
+        fingerprint=_security_fingerprint().value, blocks_release=False
+    )
+
+    assert (
+        evaluate_checks(_snapshot(check), policy, decisions=(decision, decision)) == ()
+    )
+
+
+def test_conflicting_matching_decisions_are_insufficient() -> None:
+    check = _check(name="security", conclusion="failure", run_id=201)
+    policy = _policy({"security": CheckCategory.ADVISORY})
+    fingerprint = _security_fingerprint().value
+
+    with pytest.raises(CheckEvidenceError) as raised:
+        evaluate_checks(
+            _snapshot(check),
+            policy,
+            decisions=(
+                _Decision(fingerprint=fingerprint, blocks_release=False),
+                _Decision(fingerprint=fingerprint, blocks_release=True),
+            ),
+        )
+
+    assert raised.value.codes == ("decision.conflicting:201",)
+    assert raised.value.findings == ()
+
+
+@pytest.mark.parametrize(
     ("field", "changed"),
     [
         ("repository", "other/widgets"),
@@ -358,6 +447,27 @@ def test_distinct_runs_for_one_check_name_are_insufficient_not_favorably_selecte
     assert raised.value.findings == ()
 
 
+@pytest.mark.parametrize(
+    "conflicting",
+    [
+        replace(_check(), conclusion="failure"),
+        replace(_check(), source_id="different-source"),
+    ],
+)
+def test_same_run_and_name_with_contradictory_fields_is_insufficient(
+    conflicting: GitHubCheck,
+) -> None:
+    with pytest.raises(CheckEvidenceError) as raised:
+        evaluate_checks(
+            _snapshot(_check(), _check(), conflicting),
+            _policy(),
+            decisions=(),
+        )
+
+    assert raised.value.codes == ("check.conflicting_run:101",)
+    assert raised.value.findings == ()
+
+
 def test_conflicting_duplicate_run_id_is_insufficient() -> None:
     policy = _policy(
         {"api": CheckCategory.BLOCKING, "security": CheckCategory.ADVISORY}
@@ -395,16 +505,16 @@ def test_unknown_checks_each_require_classification_in_stable_order() -> None:
     [
         {"head_sha": "b" * 40},
         {"head_sha": "ABC"},
-        {"url": "http://github.com/acme/widgets/actions/runs/101"},
-        {"url": "https://github.com/acme/widgets/actions/runs/102"},
-        {"url": "https://github.com/acme/widgets/actions/runs/101?x=1"},
-        {"url": "https://user@github.com/acme/widgets/actions/runs/101"},
-        {"url": "https://github.com:443/acme/widgets/actions/runs/101"},
+        {"url": "http://github.com/acme/widgets/runs/101"},
+        {"url": "https://github.com/acme/widgets/runs/102"},
+        {"url": "https://github.com/acme/widgets/runs/101?x=1"},
+        {"url": "https://user@github.com/acme/widgets/runs/101"},
+        {"url": "https://github.com:443/acme/widgets/runs/101"},
         {"source_id": "102"},
         {
             "run_id": 0,
             "source_id": "0",
-            "url": "https://github.com/acme/widgets/actions/runs/0",
+            "url": "https://github.com/acme/widgets/runs/0",
         },
         {"name": " api"},
         {"name": ""},
@@ -434,6 +544,33 @@ def test_malformed_check_evidence_is_typed_insufficiency(
 
     assert raised.value.codes
     assert all(code.startswith("check.") for code in raised.value.codes)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"started_at": None},
+        {"completed_at": None},
+        {"started_at": NOW.replace(tzinfo=None)},
+        {"completed_at": NOW.replace(tzinfo=None)},
+        {"started_at": datetime(2026, 8, 7, 13, tzinfo=UTC)},
+        {"completed_at": datetime(2026, 8, 7, 13, tzinfo=UTC)},
+    ],
+)
+def test_success_with_incomplete_or_future_timestamps_is_insufficient(
+    change: dict[str, object],
+) -> None:
+    check = replace(
+        _check(),
+        url="https://github.com/acme/widgets/runs/101",
+        **change,
+    )
+
+    with pytest.raises(CheckEvidenceError) as raised:
+        evaluate_checks(_snapshot(check), _policy(), decisions=())
+
+    assert raised.value.codes == ("check.invalid_matrix:101",)
+    assert raised.value.findings == ()
 
 
 @pytest.mark.parametrize(
@@ -478,13 +615,83 @@ def test_malformed_policy_categories_are_typed_insufficiency() -> None:
     assert raised.value.findings == ()
 
 
+@pytest.mark.parametrize(
+    "repository",
+    [f"{'o' * 40}/widgets", f"acme/{'r' * 101}"],
+)
+def test_repository_component_overflow_is_typed_insufficiency(
+    repository: str,
+) -> None:
+    with pytest.raises(CheckEvidenceError) as raised:
+        evaluate_checks(
+            replace(_snapshot(), repository_full_name=repository),
+            _policy(),
+            decisions=(),
+        )
+
+    assert raised.value.codes == ("snapshot.invalid_repository",)
+
+
+def test_repository_component_limits_are_accepted() -> None:
+    repository = f"{'o' * 39}/{'r' * 100}"
+
+    assert (
+        evaluate_checks(
+            replace(_snapshot(), repository_full_name=repository),
+            _policy({}),
+            decisions=(),
+        )
+        == ()
+    )
+
+
+def test_run_id_must_fit_a_signed_bigint() -> None:
+    overflow = 2**63
+    check = replace(
+        _check(run_id=overflow),
+        url=f"https://github.com/acme/widgets/runs/{overflow}",
+    )
+
+    with pytest.raises(CheckEvidenceError) as raised:
+        evaluate_checks(_snapshot(check), _policy(), decisions=())
+
+    assert raised.value.codes == (f"check.invalid_identity:{overflow}",)
+
+
+def test_maximum_signed_bigint_run_id_fits_persisted_source_identity() -> None:
+    run_id = 2**63 - 1
+    check = _check(run_id=run_id, conclusion="failure")
+
+    finding = evaluate_checks(_snapshot(check), _policy(), decisions=())[0]
+
+    assert finding.evidence[0].source_id == str(run_id)
+    assert len(finding.evidence[0].source_id) <= 255
+
+
+def test_missing_check_evidence_fits_persistence_and_links_to_commit_checks() -> None:
+    check_name = "x" * 255
+    finding = evaluate_checks(
+        _snapshot(),
+        _policy({check_name: CheckCategory.BLOCKING}),
+        decisions=(),
+    )[0]
+    evidence = finding.evidence[0]
+
+    assert len(evidence.evidence_id) <= 255
+    assert len(evidence.source_id) <= 255
+    assert check_name not in evidence.source_id
+    assert evidence.url == (
+        f"https://github.com/acme/widgets/commit/{CANDIDATE_SHA}/checks"
+    )
+
+
 def test_invalid_check_preserves_independent_blocking_finding() -> None:
     policy = _policy(
         {"api": CheckCategory.BLOCKING, "security": CheckCategory.ADVISORY}
     )
     invalid = replace(
         _check(name="security", run_id=202),
-        url="https://github.com/acme/widgets/actions/runs/999",
+        url="https://github.com/acme/widgets/runs/999",
     )
 
     with pytest.raises(CheckEvidenceError) as raised:
@@ -507,7 +714,7 @@ def test_source_order_does_not_change_findings_or_insufficiency() -> None:
         _check(conclusion="failure"),
         replace(
             _check(name="security", run_id=202),
-            url="https://github.com/acme/widgets/actions/runs/999",
+            url="https://github.com/acme/widgets/runs/999",
         ),
     )
 

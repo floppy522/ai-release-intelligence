@@ -109,7 +109,7 @@ def check() -> GitHubCheck:
         source_id="1",
         run_id=1,
         name="test",
-        url="https://github.com/example/release-intelligence/actions/runs/1",
+        url="https://github.com/example/release-intelligence/runs/1",
         head_sha="candidate-sha",
         status="completed",
         conclusion="success",
@@ -360,7 +360,7 @@ async def test_reordered_identical_set_like_evidence_is_one_stable_window() -> N
         source_id="2",
         run_id=2,
         name="security",
-        url="https://github.com/example/release-intelligence/actions/runs/2",
+        url="https://github.com/example/release-intelligence/runs/2",
     )
     forward = (check(), second)
     reverse = tuple(reversed(forward))

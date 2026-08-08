@@ -210,6 +210,9 @@ async def test_check_fixture_maps_runs_without_logs() -> None:
         ("advisory-browser", "failure"),
     ]
     assert checks[0].run_id == 9400001
+    assert checks[0].url == (
+        "https://github.com/octo-fixtures/release-demo/runs/9400001"
+    )
     assert checks[0].head_sha == "4" * 40
     assert not hasattr(checks[0], "output")
     assert not hasattr(checks[0], "logs")
