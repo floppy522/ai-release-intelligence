@@ -1,0 +1,54 @@
+{
+  "cases": [
+    {
+      "name": "missing_type",
+      "issue_labels": [],
+      "expected_rules": ["scope.exactly_one_type"]
+    },
+    {
+      "name": "two_types",
+      "issue_labels": ["code-change", "release-ops"],
+      "expected_rules": ["scope.exactly_one_type"]
+    },
+    {
+      "name": "missing_pr",
+      "links": [],
+      "expected_rules": ["scope.code_change_requires_pr"]
+    },
+    {
+      "name": "pr_outside_milestone",
+      "pull_milestone": 8,
+      "expected_rules": ["scope.pr_requires_milestone"]
+    },
+    {
+      "name": "pr_not_merged_to_main",
+      "pull_base_ref": "develop",
+      "expected_rules": ["scope.pr_requires_main_merge"]
+    },
+    {
+      "name": "change_missing_from_candidate",
+      "comparison_status": "behind",
+      "comparison_merge_base_sha": "older-sha",
+      "expected_rules": ["scope.change_requires_candidate_inclusion"]
+    },
+    {
+      "name": "release_ops_without_pr",
+      "issue_labels": ["release-ops"],
+      "links": [],
+      "pulls": [],
+      "pull_items": [],
+      "comparisons": [],
+      "expected_rules": []
+    },
+    {
+      "name": "closed_non_blocking_issue",
+      "issue_state": "closed",
+      "expected_rules": []
+    },
+    {
+      "name": "merged_before_cut_and_reachable",
+      "pull_merged_days_ago": 10,
+      "expected_rules": []
+    }
+  ]
+}
