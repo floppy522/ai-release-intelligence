@@ -209,7 +209,7 @@ def _analyze_evidence(snapshot: ReleaseSnapshot) -> _EvidenceState:
             by_run[check.run_id].append(check)
     for run_id, candidates in sorted(by_run.items()):
         if len(candidates) > 1:
-            codes.append(f"check.conflicting_run:{run_id}")
+            codes.append(f"check.conflicting_run:{_run_coordinate(run_id)}")
             for check in candidates:
                 quarantined_keys.add(_check_canonical_key(check))
                 if _is_canonical_name(check.name):
@@ -272,7 +272,10 @@ def _decision_state(
         try:
             decision_fingerprint = decision.fingerprint
             blocks_release = decision.blocks_release
-        except (AttributeError, TypeError, ValueError):
+        # Decision implementations are an external Protocol boundary.  Any ordinary
+        # accessor failure invalidates the decision; process-control BaseExceptions
+        # deliberately continue to propagate.
+        except Exception:  # noqa: BLE001
             return _DecisionState.INVALID
         if (
             type(decision_fingerprint) is not str
@@ -475,14 +478,17 @@ def _is_repository_name(repository: object) -> bool:
 
 
 def _check_coordinate(check: GitHubCheck) -> str:
-    if (
-        isinstance(check.run_id, int)
-        and not isinstance(check.run_id, bool)
-        and check.run_id > 0
-    ):
-        return str(check.run_id)
-    digest = hashlib.sha256(_check_canonical_key(check).encode()).hexdigest()
-    return f"record-{digest[:16]}"
+    return _run_coordinate(check.run_id)
+
+
+def _run_coordinate(run_id: object) -> str:
+    if type(run_id) is int and 0 < run_id <= _MAX_SIGNED_BIGINT:
+        return str(run_id)
+    payload = json.dumps(
+        {"run_id": _jsonable(run_id)}, sort_keys=True, separators=(",", ":")
+    )
+    digest = hashlib.sha256(payload.encode()).hexdigest()
+    return f"run-{digest[:16]}"
 
 
 def _is_canonical_name(value: object) -> bool:
@@ -507,12 +513,44 @@ def _is_aware(value: object) -> bool:
 
 
 def _is_check_url(url: str, repository: str, run_id: int) -> bool:
-    return _is_canonical_github_url(url, f"/{repository}/runs/{run_id}")
-
-
-def _is_canonical_github_url(url: object, expected_path: str) -> bool:
-    if not isinstance(url, str):
+    path = _canonical_github_path(url)
+    if path is None:
         return False
+    if path == f"/{repository}/runs/{run_id}":
+        return True
+    prefix = f"/{repository}/"
+    if not path.startswith(prefix):
+        return False
+    parts = path.removeprefix(prefix).split("/")
+    if len(parts) == 4 and parts[:1] == ["runs"] and parts[2] == "jobs":
+        workflow_id, final_id = parts[1], parts[3]
+    elif (
+        len(parts) == 5
+        and parts[:2] == ["actions", "runs"]
+        and parts[3] == "job"
+    ):
+        workflow_id, final_id = parts[2], parts[4]
+    else:
+        return False
+    return _is_bounded_decimal(workflow_id) and final_id == str(run_id)
+
+
+def _is_bounded_decimal(value: str) -> bool:
+    maximum = str(_MAX_SIGNED_BIGINT)
+    return (
+        value.isascii()
+        and value.isdigit()
+        and not value.startswith("0")
+        and (
+            len(value) < len(maximum)
+            or (len(value) == len(maximum) and value <= maximum)
+        )
+    )
+
+
+def _canonical_github_path(url: object) -> str | None:
+    if not isinstance(url, str):
+        return None
     try:
         parsed = urlparse(url)
         hostname = parsed.hostname
@@ -520,19 +558,20 @@ def _is_canonical_github_url(url: object, expected_path: str) -> bool:
         username = parsed.username
         password = parsed.password
     except (UnicodeError, ValueError):
-        return False
-    return (
+        return None
+    if not (
         parsed.scheme == "https"
         and parsed.netloc == "github.com"
         and hostname == "github.com"
         and port is None
         and username is None
         and password is None
-        and parsed.path == expected_path
         and not parsed.params
         and not parsed.query
         and not parsed.fragment
-    )
+    ):
+        return None
+    return parsed.path
 
 
 def _jsonable(value: object) -> object:

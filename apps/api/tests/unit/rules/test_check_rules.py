@@ -89,13 +89,30 @@ class _Decision:
 
 
 class _ExplodingDecision:
+    def __init__(self, error: BaseException | None = None) -> None:
+        self._error = error or ValueError("untrusted decision")
+
     @property
     def fingerprint(self) -> str:
-        raise ValueError("untrusted decision")
+        raise self._error
 
     @property
     def blocks_release(self) -> bool:
-        raise ValueError("untrusted decision")
+        raise self._error
+
+
+class _ExplodingBlocksDecision:
+    fingerprint = CheckFingerprint(
+        repository="acme/widgets",
+        candidate_sha=CANDIDATE_SHA,
+        check_name="security",
+        run_id=201,
+        conclusion="failure",
+    ).value
+
+    @property
+    def blocks_release(self) -> bool:
+        raise RuntimeError("untrusted decision")
 
 
 @pytest.mark.parametrize(
@@ -141,6 +158,41 @@ def test_workflow_run_url_is_not_valid_check_run_evidence() -> None:
     )
     with pytest.raises(CheckEvidenceError) as raised:
         evaluate_checks(_snapshot(workflow_run), _policy(), decisions=())
+
+    assert raised.value.codes == ("check.invalid_identity:101",)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/acme/widgets/runs/800/jobs/101",
+        "https://github.com/acme/widgets/actions/runs/800/job/101",
+    ],
+)
+def test_check_run_accepts_known_actions_job_urls(url: str) -> None:
+    assert evaluate_checks(
+        _snapshot(replace(_check(), url=url)), _policy(), decisions=()
+    ) == ()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/acme/widgets/runs/800/jobs/102",
+        "https://github.com/acme/widgets/actions/runs/800/job/102",
+        "https://github.com/acme/widgets/runs/0/jobs/101",
+        f"https://github.com/acme/widgets/runs/{2**63}/jobs/101",
+        f"https://github.com/acme/widgets/runs/{'9' * 5000}/jobs/101",
+        "https://github.com/acme/widgets/runs/800/jobs/101/extra",
+        "https://github.com/acme/widgets/actions/runs/800/jobs/101",
+        "https://github.com/acme/widgets/actions/runs/800/job/101?attempt=2",
+    ],
+)
+def test_check_run_rejects_unsafe_or_ambiguous_actions_paths(url: str) -> None:
+    with pytest.raises(CheckEvidenceError) as raised:
+        evaluate_checks(
+            _snapshot(replace(_check(), url=url)), _policy(), decisions=()
+        )
 
     assert raised.value.codes == ("check.invalid_identity:101",)
 
@@ -315,6 +367,9 @@ def test_matching_blocker_decision_turns_advisory_into_a_blocker() -> None:
             blocks_release=cast(bool, ""),
         ),
         _ExplodingDecision(),
+        _ExplodingDecision(RuntimeError("untrusted decision")),
+        _ExplodingDecision(LookupError("untrusted decision")),
+        _ExplodingBlocksDecision(),
     ],
 )
 def test_malformed_decision_is_typed_insufficiency(decision: object) -> None:
@@ -330,6 +385,19 @@ def test_malformed_decision_is_typed_insufficiency(decision: object) -> None:
 
     assert raised.value.codes == ("decision.invalid:201",)
     assert raised.value.findings == ()
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(2)])
+def test_decision_process_control_exceptions_propagate(error: BaseException) -> None:
+    check = _check(name="security", conclusion="failure", run_id=201)
+    policy = _policy({"security": CheckCategory.ADVISORY})
+
+    with pytest.raises(type(error)):
+        evaluate_checks(
+            _snapshot(check),
+            policy,
+            decisions=(cast(_Decision, _ExplodingDecision(error)),),
+        )
 
 
 def test_exact_duplicate_decisions_are_idempotent() -> None:
@@ -655,7 +723,33 @@ def test_run_id_must_fit_a_signed_bigint() -> None:
     with pytest.raises(CheckEvidenceError) as raised:
         evaluate_checks(_snapshot(check), _policy(), decisions=())
 
-    assert raised.value.codes == (f"check.invalid_identity:{overflow}",)
+    code = raised.value.codes[0]
+    assert code.startswith("check.invalid_identity:run-")
+    assert len(code) == len("check.invalid_identity:run-") + 16
+    assert str(overflow) not in code
+
+
+def test_huge_run_id_error_coordinate_is_fixed_and_deterministic() -> None:
+    huge = 2**1000
+    checks = (
+        replace(_check(run_id=huge), url=f"https://github.com/acme/widgets/runs/{huge}"),
+        replace(
+            _check(run_id=huge),
+            source_id="conflicting",
+            url=f"https://github.com/acme/widgets/runs/{huge}",
+        ),
+    )
+
+    codes = []
+    for ordered in (checks, tuple(reversed(checks))):
+        with pytest.raises(CheckEvidenceError) as raised:
+            evaluate_checks(_snapshot(*ordered), _policy(), decisions=())
+        codes.append(raised.value.codes)
+
+    assert codes[0] == codes[1]
+    assert codes[0][0].startswith("check.conflicting_run:run-")
+    assert len(codes[0][0]) == len("check.conflicting_run:run-") + 16
+    assert str(huge) not in codes[0][0]
 
 
 def test_maximum_signed_bigint_run_id_fits_persisted_source_identity() -> None:
