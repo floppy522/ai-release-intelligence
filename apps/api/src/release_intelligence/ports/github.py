@@ -90,6 +90,7 @@ class GitHubItem:
     milestone_number: int | None
     created_at: datetime
     updated_at: datetime
+    body: str = ""
 
 
 @dataclass(frozen=True, slots=True)

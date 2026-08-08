@@ -22,6 +22,9 @@ class GitHubPayloadError(ValueError):
     """An internal marker for malformed or unsafe upstream payloads."""
 
 
+MAX_ISSUE_BODY_LENGTH = 65_536
+
+
 def _invalid() -> Never:
     raise GitHubPayloadError("invalid GitHub payload")
 
@@ -98,6 +101,14 @@ def _milestone_number(value: object) -> int | None:
     return _integer(_mapping(value).get("number"))
 
 
+def _issue_body(value: object) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str) or len(value) > MAX_ISSUE_BODY_LENGTH:
+        return _invalid()
+    return value
+
+
 def map_milestone(payload: object) -> GitHubMilestone:
     item = _mapping(payload)
     return GitHubMilestone(
@@ -129,6 +140,7 @@ def map_item(payload: object) -> GitHubItem:
         milestone_number=_milestone_number(item.get("milestone")),
         created_at=_required_timestamp(item.get("created_at")),
         updated_at=_required_timestamp(item.get("updated_at")),
+        body=(_issue_body(item.get("body")) if kind is GitHubItemKind.ISSUE else ""),
     )
 
 

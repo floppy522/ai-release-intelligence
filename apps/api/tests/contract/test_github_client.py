@@ -91,6 +91,8 @@ async def test_client_follows_rfc_link_and_preserves_latest_rate_limit() -> None
         (141, "ISSUE"),
         (142, "PULL_REQUEST"),
     ]
+    assert items[0].body.startswith("### Before release")
+    assert items[1].body == ""
     assert items[1].url == "https://github.com/octo-fixtures/release-demo/pull/142"
     assert client.rate_limit.remaining == 4997
     assert client.rate_limit.reset_at == datetime.fromtimestamp(1786125600, UTC)
@@ -123,6 +125,18 @@ async def test_get_milestone_maps_only_normalized_fields() -> None:
     assert milestone.due_on == datetime(2026, 8, 10, 12, tzinfo=UTC)
     assert not hasattr(milestone, "title")
     assert not hasattr(milestone, "description")
+
+
+async def test_issue_body_is_bounded_before_normalization() -> None:
+    payload = _fixture("milestone_items.json")
+    assert isinstance(payload, list)
+    oversized = {**payload[0], "body": "x" * 65_537}
+    client, http = _client(lambda request: _response(request, 200, [oversized]))
+    try:
+        with pytest.raises(GitHubPartialData, match="incomplete"):
+            await client.list_milestone_items(REPO, 7)
+    finally:
+        await http.aclose()
 
 
 async def test_issue_timeline_maps_only_pull_request_cross_references() -> None:
@@ -872,7 +886,6 @@ async def test_injected_client_remains_open_after_adapter_close() -> None:
 
 def test_contract_fixtures_contain_only_allowlisted_evidence_fields() -> None:
     forbidden = {
-        "body",
         "body_text",
         "comment",
         "comments",

@@ -93,6 +93,10 @@ class ReadinessFinding:
     def requires_decision(self) -> bool:
         return self.severity == "DECISION_REQUIRED"
 
+    @property
+    def decision_allowed(self) -> bool:
+        return self.requires_decision
+
 
 @dataclass(frozen=True)
 class ReadinessAssessment:
