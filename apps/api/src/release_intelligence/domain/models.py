@@ -85,6 +85,14 @@ class ReadinessFinding:
     required_action: str
     evidence: tuple[EvidenceRef, ...]
 
+    @property
+    def blocks_release(self) -> bool:
+        return self.severity == "BLOCKING"
+
+    @property
+    def requires_decision(self) -> bool:
+        return self.severity == "DECISION_REQUIRED"
+
 
 @dataclass(frozen=True)
 class ReadinessAssessment:
