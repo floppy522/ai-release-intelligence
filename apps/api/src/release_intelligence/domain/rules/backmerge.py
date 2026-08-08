@@ -383,8 +383,8 @@ def _analyze_links(
 ]:
     grouped: defaultdict[tuple[int, int], dict[str, ReleaseLink]] = defaultdict(dict)
     invalid, alias_codes = _link_source_aliases(snapshot.links)
-    uncertain_issues: set[int] = set()
-    uncertain_pulls: set[int] = set()
+    uncertain_issues = {issue_number for issue_number, _pull_number in invalid}
+    uncertain_pulls = {pull_number for _issue_number, pull_number in invalid}
     codes: list[str] = list(alias_codes)
     all_issue_numbers = {
         item.number
@@ -412,6 +412,8 @@ def _analyze_links(
         if relation_codes or pair in invalid:
             codes.extend(relation_codes)
             invalid.add(pair)
+            uncertain_issues.add(issue_number)
+            uncertain_pulls.add(pull_number)
             continue
         grouped[pair][_full_link_sort_key(relation)] = relation
 
@@ -420,6 +422,8 @@ def _analyze_links(
         if len(records) != 1:
             codes.append(f"link.conflicting_records:{pair[0]}:{pair[1]}")
             invalid.add(pair)
+            uncertain_issues.add(pair[0])
+            uncertain_pulls.add(pair[1])
             continue
         valid.append(next(iter(records.values())))
     return (

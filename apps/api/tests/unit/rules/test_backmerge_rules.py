@@ -797,6 +797,152 @@ def test_link_source_id_cannot_alias_distinct_relations() -> None:
     assert raised.value.codes == ("link.conflicting_source_id:142:143:145:143",)
 
 
+def test_aliased_possible_main_link_quarantines_both_relation_endpoints() -> None:
+    unrelated = issue(147)
+    aliased_main = link(142, 144, source_id="999")
+    alias_peer = link(145, 146, source_id="999")
+    stable_links = (link(142, 143), link(147, 143))
+    release = snapshot(
+        items=(
+            issue(142),
+            issue(145, milestone=5),
+            unrelated,
+            pull_item(143),
+        ),
+        pulls=(
+            pull(143, base_ref=PREVIOUS_BRANCH),
+            pull(144, base_ref="main", milestone=None),
+            pull(146, base_ref="develop", milestone=None),
+        ),
+    )
+
+    expected_findings = None
+    for aliases in ((aliased_main, alias_peer), (alias_peer, aliased_main)):
+        for relations in (stable_links, tuple(reversed(stable_links))):
+            with pytest.raises(BackmergeEvidenceError) as raised:
+                evaluate_backmerge(
+                    replace(release, links=(*relations, *aliases)), POLICY
+                )
+
+            assert raised.value.codes == ("link.conflicting_source_id:142:144:145:146",)
+            assert [
+                finding.evidence[0].source_id for finding in raised.value.findings
+            ] == [unrelated.source_id]
+            if expected_findings is None:
+                expected_findings = raised.value.findings
+            assert raised.value.findings == expected_findings
+
+
+@pytest.mark.parametrize(
+    ("malformed", "expected_code"),
+    [
+        (
+            lambda relation: replace(
+                relation,
+                url="https://github.com/attacker/repo/pull/144",
+            ),
+            "link.invalid_url:142:144",
+        ),
+        (
+            lambda relation: replace(relation, source_id="invalid"),
+            "link.invalid_source_id:142:144",
+        ),
+        (
+            lambda relation: replace(relation, created_at=NOW.replace(tzinfo=None)),
+            "link.invalid_timestamps:142:144",
+        ),
+    ],
+)
+def test_rejected_safe_coordinate_link_quarantines_both_dependencies(
+    malformed, expected_code: str
+) -> None:
+    unrelated = issue(147)
+    possible_main = link(142, 144)
+    base_links = (link(142, 143), link(147, 143))
+    release = snapshot(
+        items=(issue(142), unrelated, pull_item(143)),
+        pulls=(
+            pull(143, base_ref=PREVIOUS_BRANCH),
+            pull(144, base_ref="main", milestone=None),
+        ),
+    )
+
+    for relations in (
+        (*base_links, malformed(possible_main)),
+        (malformed(possible_main), *reversed(base_links)),
+    ):
+        with pytest.raises(BackmergeEvidenceError) as raised:
+            evaluate_backmerge(replace(release, links=relations), POLICY)
+
+        assert raised.value.codes == (expected_code,)
+        assert [finding.evidence[0].source_id for finding in raised.value.findings] == [
+            unrelated.source_id
+        ]
+
+
+def test_conflicting_possible_main_link_quarantines_both_dependencies() -> None:
+    unrelated = issue(147)
+    first = link(142, 144)
+    second = replace(first, source_id="999")
+    stable_links = (link(142, 143), link(147, 143))
+    release = snapshot(
+        items=(issue(142), unrelated, pull_item(143)),
+        pulls=(
+            pull(143, base_ref=PREVIOUS_BRANCH),
+            pull(144, base_ref="main", milestone=None),
+        ),
+    )
+
+    expected_findings = None
+    for conflict in ((first, second), (second, first)):
+        with pytest.raises(BackmergeEvidenceError) as raised:
+            evaluate_backmerge(
+                replace(release, links=(*reversed(stable_links), *conflict)), POLICY
+            )
+
+        assert raised.value.codes == ("link.conflicting_records:142:144",)
+        assert [finding.evidence[0].source_id for finding in raised.value.findings] == [
+            unrelated.source_id
+        ]
+        if expected_findings is None:
+            expected_findings = raised.value.findings
+        assert raised.value.findings == expected_findings
+
+
+def test_missing_issue_link_quarantines_only_its_valid_pull_endpoint() -> None:
+    proven = issue(147)
+    release = snapshot(
+        items=(proven, pull_item(143), pull_item(146)),
+        links=(link(999, 143), link(147, 146)),
+        pulls=(
+            pull(143, base_ref=PREVIOUS_BRANCH),
+            pull(146, base_ref=PREVIOUS_BRANCH),
+        ),
+    )
+
+    with pytest.raises(BackmergeEvidenceError) as raised:
+        evaluate_backmerge(release, POLICY)
+
+    assert raised.value.codes == ("link.missing_issue:999:143",)
+    assert [finding.evidence[0].source_id for finding in raised.value.findings] == [
+        proven.source_id
+    ]
+
+
+def test_exact_duplicate_links_remain_idempotent_not_uncertain() -> None:
+    relation = link(142, 143)
+    release = snapshot(
+        links=(relation,),
+        pulls=(pull(143, base_ref=PREVIOUS_BRANCH),),
+    )
+    expected = evaluate_backmerge(release, POLICY)
+
+    assert (
+        evaluate_backmerge(replace(release, links=(relation, relation)), POLICY)
+        == expected
+    )
+
+
 def test_pr_item_and_pull_source_id_must_match() -> None:
     release = snapshot(
         items=(issue(), pull_item(143, source_id="999")),
