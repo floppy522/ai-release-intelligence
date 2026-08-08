@@ -329,11 +329,17 @@ def _analyze_evidence(snapshot: ReleaseSnapshot) -> _EvidenceState:
         if not _is_direct_url(pull_record.url, repository, "pull", pull_record.number):
             codes.append(f"pull.invalid_url:{pull_record.number}")
             invalid_pr_issues.update(linked_issues_by_pull[pull_record.number])
-    for relation in snapshot.comparisons:
+    for pull_number, relation in sorted(
+        _unique_comparisons(snapshot.comparisons).items()
+    ):
+        if relation is None:
+            codes.append(f"comparison.conflicting_records:{pull_number}")
+            invalid_comparison_issues.update(linked_issues_by_pull[pull_number])
+            continue
         comparison = relation.comparison
-        related_pull = unique_pulls.get(relation.pull_request_number)
+        related_pull = unique_pulls.get(pull_number)
         if (
-            relation.pull_request_number not in pull_numbers
+            pull_number not in pull_numbers
             or (
                 related_pull is not None
                 and comparison.base_sha != related_pull.merge_commit_sha
@@ -354,15 +360,11 @@ def _analyze_evidence(snapshot: ReleaseSnapshot) -> _EvidenceState:
                 for commit in comparison.commits
             )
         ):
-            codes.append(f"comparison.invalid_identity:{relation.pull_request_number}")
-            invalid_comparison_issues.update(
-                linked_issues_by_pull[relation.pull_request_number]
-            )
+            codes.append(f"comparison.invalid_identity:{pull_number}")
+            invalid_comparison_issues.update(linked_issues_by_pull[pull_number])
         elif not _is_coherent_comparison_matrix(comparison):
-            codes.append(f"comparison.invalid_matrix:{relation.pull_request_number}")
-            invalid_comparison_issues.update(
-                linked_issues_by_pull[relation.pull_request_number]
-            )
+            codes.append(f"comparison.invalid_matrix:{pull_number}")
+            invalid_comparison_issues.update(linked_issues_by_pull[pull_number])
     return _EvidenceState(
         codes=tuple(sorted(set(codes))),
         invalid_issue_numbers=frozenset(invalid_issues),

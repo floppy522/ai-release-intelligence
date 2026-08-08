@@ -551,20 +551,8 @@ def test_milestone_finding_fingerprints_the_pr_item_evidence() -> None:
     assert _is_direct_github_issue_or_pr(other_milestone.evidence[-1].url)
 
 
-@pytest.mark.parametrize(
-    "corrupt_comparisons",
-    [
-        (),
-        (
-            comparison(143),
-            comparison(143, status="behind"),
-        ),
-    ],
-)
-def test_missing_or_ambiguous_comparison_does_not_fail_open(
-    corrupt_comparisons: tuple[PullRequestComparison, ...],
-) -> None:
-    findings = evaluate_scope(snapshot(comparisons=corrupt_comparisons), POLICY)
+def test_absent_comparison_is_a_normal_candidate_blocker() -> None:
+    findings = evaluate_scope(snapshot(comparisons=()), POLICY)
 
     assert tuple(finding.rule_id for finding in findings) == (
         "scope.change_requires_candidate_inclusion",
@@ -602,6 +590,36 @@ def test_duplicate_comparison_evidence_is_idempotent() -> None:
     duplicated = evaluate_scope(snapshot(comparisons=(invalid, invalid)), POLICY)
 
     assert duplicated == once
+
+
+def test_conflicting_coherent_comparisons_are_order_stable_insufficiency() -> None:
+    ahead = comparison(143)
+    behind = comparison(143, status="behind")
+
+    for records in ((ahead, behind), (behind, ahead)):
+        with pytest.raises(ScopeEvidenceError) as raised:
+            evaluate_scope(snapshot(comparisons=records), POLICY)
+
+        assert raised.value.findings == ()
+        assert raised.value.codes == ("comparison.conflicting_records:143",)
+
+
+def test_conflicting_comparisons_preserve_unrelated_proven_findings() -> None:
+    release = snapshot(
+        items=(issue(142), issue(145), pull_item(146)),
+        links=(link(145, 146),),
+        pulls=(pull(146),),
+        comparisons=(comparison(146), comparison(146, status="behind")),
+    )
+
+    with pytest.raises(ScopeEvidenceError) as raised:
+        evaluate_scope(release, POLICY)
+
+    assert [
+        (finding.rule_id, finding.evidence[0].source_id)
+        for finding in raised.value.findings
+    ] == [("scope.code_change_requires_pr", "1420")]
+    assert raised.value.codes == ("comparison.conflicting_records:146",)
 
 
 @pytest.mark.parametrize(
