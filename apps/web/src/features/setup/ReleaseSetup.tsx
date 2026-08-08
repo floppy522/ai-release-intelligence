@@ -282,7 +282,7 @@ function PolicyForm({
           value={mainBranch}
           onChange={(event) => setMainBranch(event.target.value)}
           aria-invalid={invalidFields.has("main")}
-          aria-describedby={invalidFields.has("main") ? "required-error" : undefined}
+          aria-describedby={invalidFields.has("main") ? (requiredError ? "required-error" : "field-error") : undefined}
         />
       </label>
       <label>

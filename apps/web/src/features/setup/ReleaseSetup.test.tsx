@@ -300,6 +300,27 @@ it("validates calendar branches before sending and marks fields invalid", async 
   expect(putReleasePolicy).not.toHaveBeenCalled();
 });
 
+it("links both colliding branch fields to the semantic field error", async () => {
+  renderWithQueryClient(<ReleaseSetup {...PROPS} />);
+  await fillRequiredPolicy();
+  fireEvent.change(screen.getByLabelText("Main branch"), {
+    target: { value: "release/2026-08-10" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save policy" }));
+
+  for (const label of ["Main branch", "Candidate branch"]) {
+    expect(screen.getByLabelText(label)).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText(label)).toHaveAttribute(
+      "aria-describedby",
+      "field-error",
+    );
+  }
+  expect(screen.getByText(/valid candidate release branch/)).toHaveAttribute(
+    "id",
+    "field-error",
+  );
+});
+
 it("keeps configured checks when discovery changes after mount", async () => {
   vi.mocked(putReleasePolicy).mockResolvedValue(policyRecord(1, "main"));
 
