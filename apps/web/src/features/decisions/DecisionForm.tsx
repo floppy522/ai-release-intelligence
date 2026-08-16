@@ -27,13 +27,21 @@ export function DecisionForm({
   const [saving, setSaving] = useState(false);
   const evidence = finding.evidence[0];
 
-  async function choose(kind: DecisionKind) {
+  function choose(kind: DecisionKind) {
     setSelected(kind);
     setStatus(null);
+    setValidation(null);
+  }
+
+  async function submit() {
+    if (selected === null) {
+      setValidation("Choose whether to accept the risk or block the release");
+      return;
+    }
     const canonicalReason = reason.trim();
     if (!canonicalReason) {
       setValidation(
-        kind === "ACCEPTED_RISK"
+        selected === "ACCEPTED_RISK"
           ? "Explain why this risk is acceptable"
           : "Explain why this release must be blocked",
       );
@@ -55,13 +63,13 @@ export function DecisionForm({
         {
           finding_id: finding.finding_id,
           fingerprint: finding.decision_fingerprint,
-          decision: kind,
+          decision: selected,
           reason: canonicalReason,
         },
         csrfToken,
       );
       setStatus(
-        kind === "ACCEPTED_RISK"
+        selected === "ACCEPTED_RISK"
           ? "Accepted risk recorded"
           : "Release blocker recorded",
       );
@@ -74,7 +82,12 @@ export function DecisionForm({
   }
 
   return (
-    <form onSubmit={(event) => event.preventDefault()}>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit();
+      }}
+    >
       <p className="decision-form__title">
         <strong>Human decision required</strong>
       </p>
@@ -90,7 +103,7 @@ export function DecisionForm({
         </div>
       </dl>
       <label>
-        Decision reason
+        Reason
         <textarea
           value={reason}
           onChange={(event) => setReason(event.target.value)}
@@ -112,7 +125,7 @@ export function DecisionForm({
           type="button"
           aria-pressed={selected === "ACCEPTED_RISK"}
           disabled={saving}
-          onClick={() => void choose("ACCEPTED_RISK")}
+          onClick={() => choose("ACCEPTED_RISK")}
         >
           Accept risk
         </button>
@@ -120,11 +133,14 @@ export function DecisionForm({
           type="button"
           aria-pressed={selected === "RELEASE_BLOCKER"}
           disabled={saving}
-          onClick={() => void choose("RELEASE_BLOCKER")}
+          onClick={() => choose("RELEASE_BLOCKER")}
         >
           Block release
         </button>
       </div>
+      <button type="submit" disabled={saving}>
+        Record decision
+      </button>
       {validation ? (
         <p id={errorId} role="alert">
           {validation}

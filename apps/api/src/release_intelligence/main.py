@@ -1,3 +1,4 @@
+import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -15,6 +16,7 @@ from release_intelligence.adapters.ai.openai_provider import (
     OpenAIClient,
     OpenAIExplanationProvider,
 )
+from release_intelligence.adapters.fixtures.github_source import FixtureGitHubSource
 from release_intelligence.adapters.github.auth import (
     GitHubAppTokenProvider,
     GitHubOAuthGateway,
@@ -30,6 +32,7 @@ from release_intelligence.api.dependencies import (
 )
 from release_intelligence.api.routes.auth import router as auth_router
 from release_intelligence.api.routes.decisions import router as decisions_router
+from release_intelligence.api.routes.e2e import router as e2e_router
 from release_intelligence.api.routes.explanations import router as explanations_router
 from release_intelligence.api.routes.releases import router as releases_router
 from release_intelligence.api.routes.repositories import router as repositories_router
@@ -43,7 +46,7 @@ from release_intelligence.application.analyze_release import (
 )
 from release_intelligence.application.decisions import DecisionService, DecisionStore
 from release_intelligence.application.explanations import ExplanationService
-from release_intelligence.config import AppSettings
+from release_intelligence.config import AppSettings, E2ESettings
 from release_intelligence.domain.models import ReadinessAssessment
 from release_intelligence.ports.ai import AIExplanationStore
 from release_intelligence.ports.auth import AuthPersistenceError
@@ -63,6 +66,7 @@ from release_intelligence.security.logging import (
 UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 DEFAULT_SESSION_TTL_SECONDS = 8 * 60 * 60
 DEFAULT_OAUTH_STATE_TTL_SECONDS = 10 * 60
+ALLOWED_ENVIRONMENTS = frozenset({"production", "development", "test", "e2e"})
 
 
 class ManagedAuthStore(AuthStore, Protocol):
@@ -129,6 +133,15 @@ def _openai_client(api_key: str) -> ManagedOpenAIClient:
     )
 
 
+def _deployment_environment(value: str | None) -> str:
+    candidate = (
+        value if value is not None else os.environ.get("ENVIRONMENT", "production")
+    )
+    if candidate not in ALLOWED_ENVIRONMENTS:
+        raise ValueError("ENVIRONMENT is invalid")
+    return candidate
+
+
 def create_app(
     *,
     auth_store: AuthStore | None = None,
@@ -148,9 +161,11 @@ def create_app(
     policy_repository_factory: PolicyRepositoryFactory = _policy_repository,
     explanation_service: ExplanationService | None = None,
     openai_client_factory: OpenAIClientFactory = _openai_client,
+    environment: str | None = None,
 ) -> FastAPI:
     install_application_log_redaction()
     effective_clock = clock or (lambda: datetime.now(UTC))
+    deployment_environment = _deployment_environment(environment)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -162,14 +177,62 @@ def create_app(
         owned_analysis_repository: ManagedAnalysisRepository | None = None
         owned_policy_repository: ManagedPolicyRepository | None = None
         owned_openai_client: ManagedOpenAIClient | None = None
-        configuration = settings
+        configuration = settings if deployment_environment != "e2e" else None
         configured_analysis_service = analysis_service
         configured_decision_service = decision_service
         configured_policy_store = policy_store
         configured_explanation_service = explanation_service
         try:
             install_access_log_redaction()
-            if configure_auth and (
+            production_auth = configure_auth
+            if configure_auth and deployment_environment == "e2e":
+                e2e_settings_loader = cast(Callable[[], E2ESettings], E2ESettings)
+                e2e_configuration = e2e_settings_loader()
+                application.state.session_ttl_seconds = (
+                    e2e_configuration.session_ttl_seconds
+                )
+                if store is None:
+                    owned_store = auth_repository_factory(
+                        e2e_configuration.database_url.get_secret_value()
+                    )
+                    store = owned_store
+                if credential_cipher is None:
+                    credential_cipher = CredentialCipher(
+                        e2e_configuration.credential_encryption_key
+                    )
+                if configured_policy_store is None:
+                    owned_policy_repository = policy_repository_factory(
+                        e2e_configuration.database_url.get_secret_value()
+                    )
+                    configured_policy_store = owned_policy_repository
+                if configured_analysis_service is None:
+                    owned_analysis_repository = analysis_repository_factory(
+                        e2e_configuration.database_url.get_secret_value(),
+                        effective_clock,
+                    )
+
+                    async def fixture_loader_factory(
+                        analysis_request: AnalysisRequest,
+                    ) -> ReleaseLoader:
+                        del analysis_request
+                        return GitHubReleaseLoader(
+                            FixtureGitHubSource(clock=effective_clock),
+                            clock=effective_clock,
+                        )
+
+                    configured_analysis_service = AnalysisService(
+                        loader_factory=fixture_loader_factory,
+                        repository=owned_analysis_repository,
+                        policy_repository=configured_policy_store,
+                        clock=effective_clock,
+                    )
+                if configured_decision_service is None and owned_analysis_repository:
+                    configured_decision_service = DecisionService(
+                        clock=effective_clock,
+                        store=cast(DecisionStore, owned_analysis_repository),
+                    )
+                production_auth = False
+            if production_auth and (
                 store is None or gateway is None or credential_cipher is None
             ):
                 settings_loader = cast(Callable[[], AppSettings], AppSettings)
@@ -302,17 +365,22 @@ def create_app(
     application.state.decision_service = decision_service
     application.state.policy_store = policy_store
     application.state.explanation_service = explanation_service
+    application.state.environment = deployment_environment
     application.include_router(repositories_router)
     application.include_router(auth_router)
     application.include_router(releases_router)
     application.include_router(decisions_router)
     application.include_router(explanations_router)
+    if deployment_environment == "e2e":
+        application.include_router(e2e_router)
 
     @application.middleware("http")
     async def enforce_csrf(
         request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         if request.method not in UNSAFE_METHODS:
+            return await call_next(request)
+        if deployment_environment == "e2e" and request.url.path == "/api/e2e/bootstrap":
             return await call_next(request)
         store = cast(AuthStore | None, request.app.state.auth_store)
         if store is None:
@@ -353,6 +421,10 @@ def create_app(
     @application.get("/api/demo/analysis", response_model=AssessmentResponse)
     def get_demo_analysis() -> ReadinessAssessment:
         return assess_fixture_release()
+
+    @application.get("/healthz")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
 
     return application
 

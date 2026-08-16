@@ -2,26 +2,33 @@ import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
 
 import {
+  bootstrapE2E,
+  createAnalysis,
   getAnalysisRun,
   getAIExplanation,
   getCsrfBootstrap,
   getDemoAnalysis,
+  putReleasePolicy,
   recordDecision,
 } from "../api/client";
 import { renderWithQueryClient } from "../test/render";
 import { App } from "./App";
 
 vi.mock("../api/client", () => ({
+  bootstrapE2E: vi.fn(),
+  createAnalysis: vi.fn(),
   getDemoAnalysis: vi.fn(),
   getAnalysisRun: vi.fn(),
   getCsrfBootstrap: vi.fn(),
   getAIExplanation: vi.fn(),
+  putReleasePolicy: vi.fn(),
   recordDecision: vi.fn(),
 }));
 
 afterEach(() => {
   window.history.replaceState(null, "", "/");
   vi.clearAllMocks();
+  vi.unstubAllEnvs();
 });
 
 const NOT_READY_FIXTURE = {
@@ -125,7 +132,8 @@ it("loads a real analysis-run DTO and wires authoritative decision controls", as
   expect(getCsrfBootstrap).toHaveBeenCalledOnce();
   expect(screen.getByRole("button", { name: "Accept risk" })).toBeInTheDocument();
   expect(screen.getByText(fingerprint)).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("Decision reason"), {
+  fireEvent.click(screen.getByRole("button", { name: "Accept risk" }));
+  fireEvent.change(screen.getByLabelText("Reason"), {
     target: { value: "Reviewed" },
   });
   fireEvent.click(
@@ -133,7 +141,7 @@ it("loads a real analysis-run DTO and wires authoritative decision controls", as
       name: "I, current user, confirm this human decision",
     }),
   );
-  fireEvent.click(screen.getByRole("button", { name: "Accept risk" }));
+  fireEvent.click(screen.getByRole("button", { name: "Record decision" }));
   await waitFor(() =>
     expect(recordDecision).toHaveBeenCalledWith(
       runId,
@@ -146,6 +154,76 @@ it("loads a real analysis-run DTO and wires authoritative decision controls", as
       "real-csrf-token",
     ),
   );
+});
+
+it("bootstraps the e2e session, persists policy, and starts a real analysis", async () => {
+  vi.stubEnv("VITE_ENVIRONMENT", "e2e");
+  const runId = "10000000-0000-0000-0000-000000000001";
+  vi.mocked(bootstrapE2E).mockResolvedValue({
+    repository_id: "987654",
+    repository_full_name: "floppy522/ai-release-intelligence-demo",
+    milestone_number: 7,
+    candidate_ref: "release/2026-08-10",
+  });
+  vi.mocked(getCsrfBootstrap).mockResolvedValue({ csrf_token: "real-csrf-token" });
+  vi.mocked(putReleasePolicy).mockResolvedValue({
+    repository_id: "987654",
+    version: 1,
+    policy: {
+      main_branch: "main",
+      candidate_branch: "release/2026-08-10",
+      milestone_number: 7,
+      code_change_label: "code-change",
+      release_ops_label: "release-ops",
+      blocker_label: "release-blocker",
+      check_categories: {
+        "blocking-suite": "BLOCKING",
+        "advisory-tests": "ADVISORY",
+      },
+      previous_milestone_number: null,
+      previous_release_branch: null,
+    },
+    created_at: "2026-08-16T20:00:00Z",
+  });
+  vi.mocked(createAnalysis).mockResolvedValue({ run_id: runId });
+  vi.mocked(getAnalysisRun).mockResolvedValue({
+    run_id: runId,
+    status: "NEEDS_DECISION",
+    release_name: "Milestone 7",
+    repository_id: "987654",
+    repository_full_name: "floppy522/ai-release-intelligence-demo",
+    source_fetched_at: "2026-08-16T20:00:00Z",
+    findings: [],
+  });
+
+  renderWithQueryClient(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Use demo repository" }));
+  expect(await screen.findByLabelText("Milestone")).toHaveValue("7");
+  expect(screen.getByLabelText("Release candidate")).toHaveValue(
+    "release/2026-08-10",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Run analysis" }));
+
+  await waitFor(() => expect(createAnalysis).toHaveBeenCalledWith(
+    {
+      repository_id: "987654",
+      milestone_number: 7,
+      candidate_ref: "release/2026-08-10",
+    },
+    "real-csrf-token",
+  ));
+  expect(putReleasePolicy).toHaveBeenCalledWith(
+    "987654",
+    expect.objectContaining({
+      discovered_checks: ["blocking-suite", "advisory-tests"],
+      check_categories: {
+        "blocking-suite": "BLOCKING",
+        "advisory-tests": "ADVISORY",
+      },
+    }),
+    "real-csrf-token",
+  );
+  expect(await screen.findAllByText("NEEDS DECISION")).toHaveLength(2);
 });
 
 it.each(["bootstrap failure", "empty bootstrap token"] as const)("fails closed when %s prevents authenticated CSRF bootstrap", async (caseName) => {

@@ -40,10 +40,12 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-it("requires a reason before recording accepted risk", () => {
+it("requires a reason before recording the selected accepted risk", () => {
   renderWithQueryClient(<DecisionForm finding={FINDING} />);
 
   fireEvent.click(screen.getByRole("button", { name: "Accept risk" }));
+  expect(recordDecision).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Record decision" }));
 
   expect(
     screen.getByText("Explain why this risk is acceptable"),
@@ -78,11 +80,12 @@ it("never preselects accepted risk", () => {
 
 it("requires actor confirmation before submitting", () => {
   renderWithQueryClient(<DecisionForm {...PROPS} />);
-  fireEvent.change(screen.getByLabelText("Decision reason"), {
+  fireEvent.click(screen.getByRole("button", { name: "Accept risk" }));
+  fireEvent.change(screen.getByLabelText("Reason"), {
     target: { value: "Reviewed by the release lead" },
   });
 
-  fireEvent.click(screen.getByRole("button", { name: "Accept risk" }));
+  fireEvent.click(screen.getByRole("button", { name: "Record decision" }));
 
   expect(
     screen.getByText("Confirm that this decision is yours"),
@@ -105,7 +108,8 @@ it("records an explicitly confirmed release blocker", async () => {
     assessment: { status: "NOT_READY", findings: [FINDING] },
   });
   renderWithQueryClient(<DecisionForm {...PROPS} />);
-  fireEvent.change(screen.getByLabelText("Decision reason"), {
+  fireEvent.click(screen.getByRole("button", { name: "Block release" }));
+  fireEvent.change(screen.getByLabelText("Reason"), {
     target: { value: "Security review is incomplete" },
   });
   fireEvent.click(
@@ -114,7 +118,7 @@ it("records an explicitly confirmed release blocker", async () => {
     }),
   );
 
-  fireEvent.click(screen.getByRole("button", { name: "Block release" }));
+  fireEvent.click(screen.getByRole("button", { name: "Record decision" }));
 
   await waitFor(() =>
     expect(recordDecision).toHaveBeenCalledWith(
@@ -138,7 +142,8 @@ it("sanitizes submission failures", async () => {
     new Error("postgresql://secret@database"),
   );
   renderWithQueryClient(<DecisionForm {...PROPS} />);
-  fireEvent.change(screen.getByLabelText("Decision reason"), {
+  fireEvent.click(screen.getByRole("button", { name: "Accept risk" }));
+  fireEvent.change(screen.getByLabelText("Reason"), {
     target: { value: "Reviewed" },
   });
   fireEvent.click(
@@ -147,7 +152,7 @@ it("sanitizes submission failures", async () => {
     }),
   );
 
-  fireEvent.click(screen.getByRole("button", { name: "Accept risk" }));
+  fireEvent.click(screen.getByRole("button", { name: "Record decision" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "Could not record the decision. Refresh and try again.",

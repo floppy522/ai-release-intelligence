@@ -2,9 +2,12 @@ import type {
   AIExplanationContent,
   AIExplanationMetadata,
   AIExplanationResponse,
+  AnalysisAccepted,
+  AnalysisCreatePayload,
   AnalysisRun,
   CsrfBootstrap,
   DecisionCreatePayload,
+  E2EBootstrap,
   HumanDecisionRecord,
   PolicyRecord,
   PolicyUpsertPayload,
@@ -25,6 +28,32 @@ export async function getDemoAnalysis(): Promise<ReadinessAssessment> {
   }
 
   return (await response.json()) as ReadinessAssessment;
+}
+
+export async function bootstrapE2E(): Promise<E2EBootstrap> {
+  const response = await fetch("/api/e2e/bootstrap", {
+    method: "POST",
+    credentials: "same-origin",
+  });
+  if (!response.ok) throw new ApiError(response.status);
+  return (await response.json()) as E2EBootstrap;
+}
+
+export async function createAnalysis(
+  payload: AnalysisCreatePayload,
+  csrfToken: string,
+): Promise<AnalysisAccepted> {
+  const response = await fetch("/api/analyses", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      "X-CSRF-Token": csrfToken,
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new ApiError(response.status);
+  return (await response.json()) as AnalysisAccepted;
 }
 
 export async function getAnalysisRun(runId: string): Promise<AnalysisRun> {

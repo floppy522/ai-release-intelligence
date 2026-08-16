@@ -10,6 +10,38 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class E2ESettings(BaseSettings):
+    """Minimal secrets needed by the isolated deterministic E2E stack."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="ARI_",
+        extra="ignore",
+    )
+
+    database_url: SecretStr
+    credential_encryption_key: SecretStr
+    session_ttl_seconds: Annotated[int, Field(gt=0, le=24 * 60 * 60)] = 60 * 60
+
+    @field_validator("database_url")
+    @classmethod
+    def require_postgresql(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().startswith("postgresql+asyncpg://"):
+            raise ValueError("ARI_DATABASE_URL must use PostgreSQL with asyncpg")
+        return value
+
+    @field_validator("credential_encryption_key")
+    @classmethod
+    def require_fernet_key(cls, value: SecretStr) -> SecretStr:
+        try:
+            Fernet(value.get_secret_value().encode())
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "ARI_CREDENTIAL_ENCRYPTION_KEY must be a Fernet key"
+            ) from error
+        return value
+
+
 class AppSettings(BaseSettings):
     """Deployment configuration; every secret is supplied outside source control."""
 

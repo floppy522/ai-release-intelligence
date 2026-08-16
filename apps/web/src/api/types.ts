@@ -86,6 +86,23 @@ export interface AnalysisRun {
   findings: readonly ReadinessFinding[];
 }
 
+export interface E2EBootstrap {
+  repository_id: string;
+  repository_full_name: string;
+  milestone_number: number;
+  candidate_ref: string;
+}
+
+export interface AnalysisCreatePayload {
+  repository_id: string;
+  milestone_number: number;
+  candidate_ref: string;
+}
+
+export interface AnalysisAccepted {
+  run_id: string;
+}
+
 export interface CsrfBootstrap {
   csrf_token: string;
 }

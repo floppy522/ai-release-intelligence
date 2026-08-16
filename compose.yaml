@@ -1,26 +1,28 @@
 x-api-environment: &api-environment
-  ENVIRONMENT: e2e
-  ARI_DATABASE_URL: postgresql+asyncpg://release_intelligence:e2e-only-not-secret@postgres/release_intelligence_test
-  DATABASE_URL: postgresql+asyncpg://release_intelligence:e2e-only-not-secret@postgres/release_intelligence_test
-  ARI_CREDENTIAL_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-  ARI_SESSION_TTL_SECONDS: "3600"
+  ENVIRONMENT: production
+  ARI_DATABASE_URL: postgresql+asyncpg://release_intelligence:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres/release_intelligence
+  DATABASE_URL: postgresql+asyncpg://release_intelligence:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres/release_intelligence
+  ARI_CREDENTIAL_ENCRYPTION_KEY: ${ARI_CREDENTIAL_ENCRYPTION_KEY:?set ARI_CREDENTIAL_ENCRYPTION_KEY}
+  ARI_GITHUB_APP_ID: ${ARI_GITHUB_APP_ID:?set ARI_GITHUB_APP_ID}
+  ARI_GITHUB_PRIVATE_KEY_PEM: ${ARI_GITHUB_PRIVATE_KEY_PEM:?set ARI_GITHUB_PRIVATE_KEY_PEM}
+  ARI_GITHUB_CLIENT_ID: ${ARI_GITHUB_CLIENT_ID:?set ARI_GITHUB_CLIENT_ID}
+  ARI_GITHUB_CLIENT_SECRET: ${ARI_GITHUB_CLIENT_SECRET:?set ARI_GITHUB_CLIENT_SECRET}
 
 services:
   postgres:
     image: postgres:18-alpine
     environment:
-      POSTGRES_DB: release_intelligence_test
+      POSTGRES_DB: release_intelligence
       POSTGRES_USER: release_intelligence
-      POSTGRES_PASSWORD: e2e-only-not-secret
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U release_intelligence -d release_intelligence_test"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
-      start_period: 5s
+      test: ["CMD-SHELL", "pg_isready -U release_intelligence -d release_intelligence"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
     networks: [database]
     volumes:
-      - postgres_test_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     security_opt: ["no-new-privileges:true"]
 
   migrate:
@@ -49,9 +51,9 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()"]
-      interval: 2s
+      interval: 10s
       timeout: 3s
-      retries: 20
+      retries: 5
       start_period: 5s
     networks: [database, edge]
     read_only: true
@@ -63,17 +65,17 @@ services:
       context: ./apps/web
       dockerfile: Dockerfile
       args:
-        VITE_ENVIRONMENT: e2e
+        VITE_ENVIRONMENT: production
     depends_on:
       api:
         condition: service_healthy
     ports:
-      - "127.0.0.1:4173:8080"
+      - "127.0.0.1:${ARI_WEB_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
-      interval: 2s
+      interval: 10s
       timeout: 3s
-      retries: 20
+      retries: 5
       start_period: 5s
     networks: [edge]
     read_only: true
@@ -89,4 +91,4 @@ networks:
   edge: {}
 
 volumes:
-  postgres_test_data: {}
+  postgres_data: {}

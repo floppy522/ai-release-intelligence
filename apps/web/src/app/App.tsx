@@ -1,17 +1,21 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 
 import {
+  bootstrapE2E,
+  createAnalysis,
   getAIExplanation,
   getAnalysisRun,
   getCsrfBootstrap,
   getDemoAnalysis,
+  putReleasePolicy,
 } from "../api/client";
-import type { AnalysisRun } from "../api/types";
+import type { AnalysisRun, E2EBootstrap } from "../api/types";
 import { ReleaseReport } from "../features/report/ReleaseReport";
 
 export function App() {
   const parameters = new URLSearchParams(window.location.search);
-  const runId = parameters.get("analysis_run_id");
+  const [runId, setRunId] = useState(parameters.get("analysis_run_id"));
   const demoMode = !runId && parameters.get("demo") === "fixture";
   const analysisQuery = useQuery({
     queryKey: ["analysis-run", runId],
@@ -96,7 +100,111 @@ export function App() {
     <main className="release-landing">
       <h1>Release intelligence</h1>
       <p>Open an analysis run to review release readiness.</p>
+      {import.meta.env.VITE_ENVIRONMENT === "e2e" ? (
+        <E2EReleaseStart
+          onStarted={(nextRunId) => {
+            window.history.replaceState(
+              null,
+              "",
+              `/?analysis_run_id=${encodeURIComponent(nextRunId)}`,
+            );
+            setRunId(nextRunId);
+          }}
+        />
+      ) : null}
     </main>
+  );
+}
+
+function E2EReleaseStart({ onStarted }: { onStarted: (runId: string) => void }) {
+  const [fixture, setFixture] = useState<E2EBootstrap | null>(null);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState(false);
+
+  async function connectFixture() {
+    setError(false);
+    try {
+      setFixture(await bootstrapE2E());
+    } catch {
+      setError(true);
+    }
+  }
+
+  async function runAnalysis() {
+    if (fixture === null) return;
+    setRunning(true);
+    setError(false);
+    try {
+      const { csrf_token: csrfToken } = await getCsrfBootstrap();
+      await putReleasePolicy(
+        fixture.repository_id,
+        {
+          main_branch: "main",
+          candidate_branch: fixture.candidate_ref,
+          milestone_number: fixture.milestone_number,
+          code_change_label: "code-change",
+          release_ops_label: "release-ops",
+          blocker_label: "release-blocker",
+          discovered_checks: ["blocking-suite", "advisory-tests"],
+          check_categories: {
+            "blocking-suite": "BLOCKING",
+            "advisory-tests": "ADVISORY",
+          },
+          previous_milestone_number: null,
+          previous_release_branch: null,
+          expected_version: null,
+        },
+        csrfToken,
+      );
+      const accepted = await createAnalysis(
+        {
+          repository_id: fixture.repository_id,
+          milestone_number: fixture.milestone_number,
+          candidate_ref: fixture.candidate_ref,
+        },
+        csrfToken,
+      );
+      onStarted(accepted.run_id);
+    } catch {
+      setError(true);
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  if (fixture === null) {
+    return (
+      <section aria-label="E2E fixture setup">
+        <button type="button" onClick={() => void connectFixture()}>
+          Use demo repository
+        </button>
+        {error ? <p role="alert">Demo repository unavailable.</p> : null}
+      </section>
+    );
+  }
+
+  return (
+    <section aria-label="E2E fixture setup">
+      <p>{fixture.repository_full_name}</p>
+      <label>
+        Milestone
+        <select defaultValue={String(fixture.milestone_number)}>
+          <option value={String(fixture.milestone_number)}>
+            {fixture.milestone_number}
+          </option>
+        </select>
+      </label>
+      <label>
+        Release candidate
+        <select defaultValue={fixture.candidate_ref}>
+          <option value={fixture.candidate_ref}>{fixture.candidate_ref}</option>
+        </select>
+      </label>
+      <button type="button" disabled={running} onClick={() => void runAnalysis()}>
+        {running ? "Running analysis…" : "Run analysis"}
+      </button>
+      {error ? <p role="alert">Could not run the analysis.</p> : null}
+    </section>
   );
 }
 

@@ -1,0 +1,107 @@
+name: Live GitHub smoke
+
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-github-smoke
+  cancel-in-progress: false
+
+jobs:
+  live-github-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: live-smoke
+    env:
+      GITHUB_APP_ID: ${{ secrets.ARI_GITHUB_APP_ID }}
+      GITHUB_PRIVATE_KEY_PEM: ${{ secrets.ARI_GITHUB_PRIVATE_KEY_PEM }}
+      GITHUB_INSTALLATION_ID: ${{ secrets.ARI_GITHUB_INSTALLATION_ID }}
+      SYNTHETIC_REPOSITORY: floppy522/ai-release-intelligence-demo
+      SYNTHETIC_MILESTONE: '7'
+      SYNTHETIC_CANDIDATE: release/2026-08-10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+      - name: Synchronize locked API dependencies
+        working-directory: apps/api
+        run: uv sync --locked
+      - name: Verify installation milestone links checks candidate and rate_limit
+        working-directory: apps/api
+        run: |
+          set -euo pipefail
+          test -n "$GITHUB_APP_ID"
+          test -n "$GITHUB_PRIVATE_KEY_PEM"
+          test -n "$GITHUB_INSTALLATION_ID"
+          uv run python - <<'PY'
+          import asyncio
+          import json
+          import os
+
+          import httpx
+          from pydantic import SecretStr
+
+          from release_intelligence.adapters.github.auth import GitHubAppTokenProvider
+          from release_intelligence.adapters.github.client import GitHubRestClient
+          from release_intelligence.ports.github import GitHubItemKind, RepoRef
+
+
+          async def main() -> None:
+              owner, name = os.environ["SYNTHETIC_REPOSITORY"].split("/", 1)
+              repository = RepoRef(owner=owner, name=name)
+              async with httpx.AsyncClient(
+                  base_url="https://api.github.com", timeout=httpx.Timeout(10.0)
+              ) as client:
+                  provider = GitHubAppTokenProvider(
+                      app_id=os.environ["GITHUB_APP_ID"],
+                      private_key=SecretStr(os.environ["GITHUB_PRIVATE_KEY_PEM"]),
+                      client=client,
+                  )
+                  token = await provider.installation_token(
+                      int(os.environ["GITHUB_INSTALLATION_ID"])
+                  )
+                  source = GitHubRestClient(token=token, client=client)
+                  milestone_number = int(os.environ["SYNTHETIC_MILESTONE"])
+                  milestone = await source.get_milestone(
+                      repository, milestone_number
+                  )
+                  items = await source.list_milestone_items(
+                      repository, milestone_number
+                  )
+                  links = []
+                  for item in items:
+                      if item.kind is GitHubItemKind.ISSUE:
+                          links.extend(
+                              await source.list_issue_timeline(repository, item.number)
+                          )
+                  candidate_sha = await source.resolve_ref(
+                      repository, os.environ["SYNTHETIC_CANDIDATE"]
+                  )
+                  checks = await source.list_checks_for_ref(
+                      repository, candidate_sha
+                  )
+                  rate_limit = source.rate_limit
+
+              assert milestone.number == milestone_number
+              assert len(links) > 0
+              assert len(checks) > 0
+              assert len(candidate_sha) == 40
+              assert rate_limit.remaining is not None
+              print(json.dumps({
+                  "installation": "authenticated",
+                  "milestone": milestone.number,
+                  "items": len(items),
+                  "links": len(links),
+                  "checks": len(checks),
+                  "candidate": "resolved",
+                  "rate_limit": "observed",
+              }, sort_keys=True))
+
+
+          asyncio.run(main())
+          PY

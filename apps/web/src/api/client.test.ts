@@ -1,6 +1,11 @@
 import { afterEach, expect, it, vi } from "vitest";
 
-import { getAIExplanation, getCsrfBootstrap } from "./client";
+import {
+  bootstrapE2E,
+  createAnalysis,
+  getAIExplanation,
+  getCsrfBootstrap,
+} from "./client";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -73,6 +78,48 @@ it.each([
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
 
   await expect(getCsrfBootstrap()).rejects.toThrow();
+});
+
+it("bootstraps e2e auth and creates an analysis through same-origin CSRF requests", async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({
+      repository_id: "987654",
+      repository_full_name: "floppy522/ai-release-intelligence-demo",
+      milestone_number: 7,
+      candidate_ref: "release/2026-08-10",
+    }), { status: 201, headers: { "Content-Type": "application/json" } }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({
+      run_id: "10000000-0000-0000-0000-000000000001",
+    }), { status: 202, headers: { "Content-Type": "application/json" } }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await bootstrapE2E();
+  await createAnalysis(
+    {
+      repository_id: "987654",
+      milestone_number: 7,
+      candidate_ref: "release/2026-08-10",
+    },
+    "csrf-token",
+  );
+
+  expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/e2e/bootstrap", {
+    method: "POST",
+    credentials: "same-origin",
+  });
+  expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/analyses", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      "X-CSRF-Token": "csrf-token",
+    },
+    body: JSON.stringify({
+      repository_id: "987654",
+      milestone_number: 7,
+      candidate_ref: "release/2026-08-10",
+    }),
+  });
 });
 
 it("requests an optional explanation with same-origin credentials and CSRF", async () => {
