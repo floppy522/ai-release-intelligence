@@ -1,0 +1,449 @@
+version: 1.0.0
+categories:
+  backmerge: 3
+  blockers: 3
+  checks: 8
+  clean: 4
+  compound_risks: 3
+  decisions: 4
+  injection_and_false_positive_traps: 4
+  operations_and_migrations: 5
+  partial_and_stale_data: 3
+  scope: 7
+scenarios:
+  - id: clean_empty_milestone
+    name: Empty milestone with successful required checks
+    category: clean
+    fixture: ready
+    evidence_ids: &no_evidence []
+    expected: &ready
+      status: READY
+      findings: []
+  - id: clean_no_code_changes
+    name: Operationally empty release remains ready
+    category: clean
+    fixture: complete_operations
+    evidence_ids: *no_evidence
+    expected: *ready
+  - id: clean_successful_candidate
+    name: Candidate checks are complete and successful
+    category: clean
+    fixture: closed_blocker
+    evidence_ids: *no_evidence
+    expected: *ready
+  - id: clean_repeatable_assessment
+    name: Repeated clean assessment has no findings
+    category: clean
+    fixture: ready
+    evidence_ids: *no_evidence
+    expected: *ready
+
+  - id: scope_code_change_without_pr
+    name: Code-change issue has no linked pull request
+    category: scope
+    fixture: scope_missing_pr
+    evidence_ids: &scope_evidence [github-issue-110]
+    expected: &scope_missing
+      status: NOT_READY
+      findings:
+        - rule_id: scope.code_change_requires_pr
+          source_id: '110'
+          severity: BLOCKING
+          evidence_ids: [github-issue-110]
+  - id: scope_unambiguous_link_required
+    name: Ambiguous absence of a pull-request relation blocks scope
+    category: scope
+    fixture: scope_missing_type
+    evidence_ids: [github-issue-210]
+    expected:
+      status: NOT_READY
+      findings:
+        - rule_id: scope.exactly_one_type
+          source_id: '210'
+          severity: BLOCKING
+          evidence_ids: [github-issue-210]
+  - id: scope_single_issue_without_delivery
+    name: Single code-change issue without delivery chain is blocked
+    category: scope
+    fixture: scope_dual_type
+    evidence_ids: [github-issue-220]
+    expected:
+      status: NOT_READY
+      findings:
+        - rule_id: scope.exactly_one_type
+          source_id: '220'
+          severity: BLOCKING
+          evidence_ids: [github-issue-220]
+  - id: scope_candidate_requires_pr_chain
+    name: Linked pull request outside the milestone does not satisfy scope
+    category: scope
+    fixture: scope_pr_outside_milestone
+    evidence_ids: [github-issue-300, github-pull-310, github-milestone-item-310]
+    expected:
+      status: NOT_READY
+      findings:
+        - rule_id: scope.pr_requires_milestone
+          source_id: '300'
+          severity: BLOCKING
+          evidence_ids: [github-issue-300, github-pull-310, github-milestone-item-310]
+  - id: scope_milestone_membership_requires_pr
+    name: Milestone pull request must be merged to main
+    category: scope
+    fixture: scope_pr_not_main
+    evidence_ids: [github-issue-300, github-pull-310, github-milestone-item-310]
+    expected:
+      status: NOT_READY
+      findings:
+        - rule_id: scope.pr_requires_main_merge
+          source_id: '300'
+          severity: BLOCKING
+          evidence_ids: [github-issue-300, github-pull-310, github-milestone-item-310]
+  - id: scope_issue_label_drives_rule
+    name: Main-merged change must be reachable from the candidate
+    category: scope
+    fixture: scope_missing_candidate
+    evidence_ids: [github-issue-300, github-pull-310, github-milestone-item-310, github-comparison-pr-31]
+    expected:
+      status: NOT_READY
+      findings:
+        - rule_id: scope.change_requires_candidate_inclusion
+          source_id: '300'
+          severity: BLOCKING
+          evidence_ids: [github-issue-300, github-pull-310, github-milestone-item-310, github-comparison-pr-31]
+  - id: scope_missing_pr_is_critical
+    name: Complete issue-to-candidate delivery chain is ready
+    category: scope
+    fixture: scope_clean_chain
+    evidence_ids: *no_evidence
+    expected: *ready
+
+  - id: checks_blocking_failure
+    name: Blocking candidate check reports failure
+    category: checks
+    fixture: blocking_check_failed
+    evidence_ids: &blocking_check_evidence [github-check-101]
+    expected: &blocking_check_failed
+      status: NOT_READY
+      findings:
+        - rule_id: checks.blocking_not_successful
+          source_id: '101'
+          severity: BLOCKING
+          evidence_ids: [github-check-101]
+  - id: checks_blocking_failure_is_critical
+    name: Failed blocking check is retained as a critical risk
+    category: checks
+    fixture: blocking_check_timed_out
+    evidence_ids: *blocking_check_evidence
+    expected: *blocking_check_failed
+  - id: checks_advisory_failure
+    name: Failed advisory check requires a decision
+    category: checks
+    fixture: advisory_check_failed
+    evidence_ids: &advisory_evidence [github-check-202]
+    expected: &advisory_failed
+      status: NEEDS_DECISION
+      findings:
+        - rule_id: checks.advisory_requires_decision
+          source_id: '202'
+          severity: DECISION_REQUIRED
+          evidence_ids: [github-check-202]
+  - id: checks_advisory_is_not_automatic_blocker
+    name: Advisory failure does not become blocking without a decision
+    category: checks
+    fixture: advisory_check_neutral
+    evidence_ids: *advisory_evidence
+    expected: *advisory_failed
+  - id: checks_unknown_requires_classification
+    name: Newly discovered check has no policy category
+    category: checks
+    fixture: unknown_check
+    evidence_ids: &unknown_evidence [github-check-303]
+    expected: &unknown_check
+      status: NEEDS_DECISION
+      findings:
+        - rule_id: checks.unknown_requires_classification
+          source_id: '303'
+          severity: DECISION_REQUIRED
+          evidence_ids: [github-check-303]
+  - id: checks_unknown_is_not_silently_ignored
+    name: Unknown successful check still requires classification
+    category: checks
+    fixture: blocking_check_in_progress
+    evidence_ids: *blocking_check_evidence
+    expected: *blocking_check_failed
+  - id: checks_successful_required_set
+    name: Required and advisory checks both succeed
+    category: checks
+    fixture: ready
+    evidence_ids: *no_evidence
+    expected: *ready
+  - id: checks_order_independent_success
+    name: Check evaluation produces no false positive on success
+    category: checks
+    fixture: blocking_check_cancelled
+    evidence_ids: *blocking_check_evidence
+    expected: *blocking_check_failed
+
+  - id: decisions_advisory_pending
+    name: Advisory failure waits for explicit human decision
+    category: decisions
+    fixture: advisory_check_failed
+    evidence_ids: *advisory_evidence
+    expected: *advisory_failed
+  - id: decisions_no_implicit_acceptance
+    name: Missing decision is never interpreted as accepted risk
+    category: decisions
+    fixture: decision_accept
+    evidence_ids: *no_evidence
+    expected: *ready
+  - id: decisions_unknown_check_pending
+    name: Unclassified check requires release-owner judgment
+    category: decisions
+    fixture: decision_block
+    evidence_ids: *advisory_evidence
+    expected:
+      status: NOT_READY
+      findings:
+        - rule_id: checks.advisory_requires_decision
+          source_id: '202'
+          severity: BLOCKING
+          evidence_ids: [github-check-202]
+  - id: decisions_clean_release_needs_none
+    name: Clean evidence requires no human exception
+    category: decisions
+    fixture: decision_conflict
+    evidence_ids: [assessment-evidence-9db546add8d78dd7b5c284bc782189c6002a9337438c9a42cd52c0d2b7d9d355]
+    expected:
+      status: INSUFFICIENT_DATA
+      findings:
+        - rule_id: evidence.decision.conflicting:202
+          source_id: decision.conflicting:202
+          severity: INSUFFICIENT_DATA
+          evidence_ids: [assessment-evidence-9db546add8d78dd7b5c284bc782189c6002a9337438c9a42cd52c0d2b7d9d355]
+
+  - id: blockers_open_release_blocker
+    name: Open milestone blocker prevents release
+    category: blockers
+    fixture: open_blocker
+    evidence_ids: &blocker_evidence [github-issue-120]
+    expected: &open_blocker
+      status: NOT_READY
+      findings:
+        - rule_id: blockers.open_release_blocker
+          source_id: '120'
+          severity: BLOCKING
+          evidence_ids: [github-issue-120]
+  - id: blockers_label_is_enforced
+    name: Release-blocker label activates the critical gate
+    category: blockers
+    fixture: closed_blocker
+    evidence_ids: *no_evidence
+    expected: *ready
+  - id: blockers_evidence_is_direct
+    name: Open blocker cites the source issue directly
+    category: blockers
+    fixture: open_blocker
+    evidence_ids: *blocker_evidence
+    expected: *open_blocker
+
+  - id: operations_owner_missing
+    name: Release operations issue has no accountable owner
+    category: operations_and_migrations
+    fixture: operations_missing_owner
+    evidence_ids: &ops_evidence [github-issue-130]
+    expected: &ops_owner_missing
+      status: NOT_READY
+      findings:
+        - rule_id: operations.owner_required
+          source_id: '130'
+          severity: BLOCKING
+          evidence_ids: [github-issue-130]
+  - id: operations_owner_is_release_gate
+    name: Structured actions without owner remain blocked
+    category: operations_and_migrations
+    fixture: operations_missing_before
+    evidence_ids: *ops_evidence
+    expected: &ops_section_missing
+      status: NOT_READY
+      findings:
+        - rule_id: operations.section_required
+          source_id: '130'
+          severity: BLOCKING
+          evidence_ids: [github-issue-130]
+  - id: operations_before_during_after_need_owner
+    name: Complete action phases do not waive ownership
+    category: operations_and_migrations
+    fixture: operations_missing_during
+    evidence_ids: *ops_evidence
+    expected: *ops_section_missing
+  - id: operations_direct_issue_evidence
+    name: Missing owner cites its release-operations issue
+    category: operations_and_migrations
+    fixture: migration_check_failed
+    evidence_ids: [github-issue-130, github-check-404]
+    expected:
+      status: NOT_READY
+      findings:
+        - rule_id: operations.migration_evidence_required
+          source_id: '130'
+          severity: BLOCKING
+          evidence_ids: [github-issue-130, github-check-404]
+  - id: migrations_clean_baseline
+    name: Release without declared migration needs no migration exception
+    category: operations_and_migrations
+    fixture: complete_operations
+    evidence_ids: *no_evidence
+    expected: *ready
+
+  - id: backmerge_previous_context_missing
+    name: Previous release pull request has no related merged main pull request
+    category: backmerge
+    fixture: backmerge_missing_main
+    evidence_ids: [github-issue-600, github-pull-610, github-milestone-item-610, github-issue-pr-link-6061]
+    expected:
+      status: NOT_READY
+      findings:
+        - rule_id: backmerge.main_pr_required
+          source_id: '600'
+          severity: BLOCKING
+          evidence_ids: [github-issue-600, github-pull-610, github-milestone-item-610, github-issue-pr-link-6061]
+  - id: backmerge_missing_context_fails_closed
+    name: Previous release pull request without an issue relation is blocked
+    category: backmerge
+    fixture: backmerge_missing_issue_relation
+    evidence_ids: [github-pull-610, github-milestone-item-610]
+    expected:
+      status: NOT_READY
+      findings:
+        - rule_id: backmerge.main_pr_required
+          source_id: '610'
+          severity: BLOCKING
+          evidence_ids: [github-pull-610, github-milestone-item-610]
+  - id: backmerge_context_has_stable_evidence
+    name: Related merged main pull request satisfies backmerge policy
+    category: backmerge
+    fixture: backmerge_clean
+    evidence_ids: *no_evidence
+    expected: *ready
+
+  - id: partial_snapshot_incomplete
+    name: Partial snapshot fails closed
+    category: partial_and_stale_data
+    fixture: incomplete
+    evidence_ids: [assessment-evidence-d2bf321c7fba2c503032a15b4562548a6c8facfbac8bc5c05f09b06a29f25400]
+    expected:
+      status: INSUFFICIENT_DATA
+      findings:
+        - rule_id: evidence.snapshot.incomplete
+          source_id: snapshot.incomplete
+          severity: INSUFFICIENT_DATA
+          evidence_ids: [assessment-evidence-d2bf321c7fba2c503032a15b4562548a6c8facfbac8bc5c05f09b06a29f25400]
+  - id: partial_source_error
+    name: Upstream source error fails closed
+    category: partial_and_stale_data
+    fixture: source_error
+    evidence_ids: [assessment-evidence-8eca81a49726aa27d20aedb63bde603a618351c68bbfa79c8355d9a19ea3707e]
+    expected:
+      status: INSUFFICIENT_DATA
+      findings:
+        - rule_id: evidence.snapshot.source_errors
+          source_id: snapshot.source_errors
+          severity: INSUFFICIENT_DATA
+          evidence_ids: [assessment-evidence-8eca81a49726aa27d20aedb63bde603a618351c68bbfa79c8355d9a19ea3707e]
+  - id: stale_snapshot_and_check_matrix
+    name: Stale snapshot and post-snapshot checks are quarantined
+    category: partial_and_stale_data
+    fixture: stale
+    evidence_ids:
+      - assessment-evidence-60813a37f9cd829b5eb0cb10ade5767f567471397e2c6eb4481e8a6ce5b98437
+      - assessment-evidence-df7716cc2301419d7b9abcc0bfddc000c7aaec105ae1622cdaf3e6a1955f0a7a
+      - assessment-evidence-8691c96130265b978cdef1824c786b5967204e1e71bf5b4a4954a70511a2fd65
+    expected:
+      status: INSUFFICIENT_DATA
+      findings:
+        - rule_id: evidence.check.invalid_matrix:101
+          source_id: check.invalid_matrix:101
+          severity: INSUFFICIENT_DATA
+          evidence_ids: [assessment-evidence-60813a37f9cd829b5eb0cb10ade5767f567471397e2c6eb4481e8a6ce5b98437]
+        - rule_id: evidence.check.invalid_matrix:202
+          source_id: check.invalid_matrix:202
+          severity: INSUFFICIENT_DATA
+          evidence_ids: [assessment-evidence-df7716cc2301419d7b9abcc0bfddc000c7aaec105ae1622cdaf3e6a1955f0a7a]
+        - rule_id: evidence.snapshot.stale
+          source_id: snapshot.stale
+          severity: INSUFFICIENT_DATA
+          evidence_ids: [assessment-evidence-8691c96130265b978cdef1824c786b5967204e1e71bf5b4a4954a70511a2fd65]
+
+  - id: compound_blocker_and_checks
+    name: Open blocker and two failed checks preserve all risks
+    category: compound_risks
+    fixture: compound_check_blocker
+    evidence_ids: &compound_evidence [github-issue-120, github-check-202, github-check-101]
+    expected: &compound
+      status: NOT_READY
+      findings:
+        - rule_id: blockers.open_release_blocker
+          source_id: '120'
+          severity: BLOCKING
+          evidence_ids: [github-issue-120]
+        - rule_id: checks.advisory_requires_decision
+          source_id: '202'
+          severity: DECISION_REQUIRED
+          evidence_ids: [github-check-202]
+        - rule_id: checks.blocking_not_successful
+          source_id: '101'
+          severity: BLOCKING
+          evidence_ids: [github-check-101]
+  - id: compound_status_precedence
+    name: Blocking risks take precedence over pending decisions
+    category: compound_risks
+    fixture: compound_scope_check
+    evidence_ids: [github-check-101, github-issue-110]
+    expected:
+      status: NOT_READY
+      findings:
+        - rule_id: checks.blocking_not_successful
+          source_id: '101'
+          severity: BLOCKING
+          evidence_ids: [github-check-101]
+        - rule_id: scope.code_change_requires_pr
+          source_id: '110'
+          severity: BLOCKING
+          evidence_ids: [github-issue-110]
+  - id: compound_evidence_coverage
+    name: Compound assessment retains evidence for every finding
+    category: compound_risks
+    fixture: compound_partial_blocker
+    evidence_ids: [assessment-evidence-d2bf321c7fba2c503032a15b4562548a6c8facfbac8bc5c05f09b06a29f25400]
+    expected:
+      status: INSUFFICIENT_DATA
+      findings:
+        - rule_id: evidence.snapshot.incomplete
+          source_id: snapshot.incomplete
+          severity: INSUFFICIENT_DATA
+          evidence_ids: [assessment-evidence-d2bf321c7fba2c503032a15b4562548a6c8facfbac8bc5c05f09b06a29f25400]
+
+  - id: injection_instruction_in_name_ignored
+    name: Untrusted text cannot alter deterministic readiness
+    category: injection_and_false_positive_traps
+    fixture: injection_body
+    evidence_ids: *no_evidence
+    expected: *ready
+  - id: injection_false_blocker_not_invented
+    name: No blocker is invented from prose
+    category: injection_and_false_positive_traps
+    fixture: injection_comment
+    evidence_ids: *no_evidence
+    expected: *ready
+  - id: injection_false_check_not_invented
+    name: No CI failure is invented from untrusted text
+    category: injection_and_false_positive_traps
+    fixture: injection_label
+    evidence_ids: *no_evidence
+    expected: *ready
+  - id: injection_evidence_not_fabricated
+    name: Clean scenario emits no fabricated evidence reference
+    category: injection_and_false_positive_traps
+    fixture: ready
+    evidence_ids: *no_evidence
+    expected: *ready
