@@ -24,6 +24,7 @@ class GitHubPayloadError(ValueError):
 
 
 MAX_ISSUE_BODY_LENGTH = 65_536
+MAX_TITLE_LENGTH = 512
 MAX_ASSIGNEES = 100
 _GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
 
@@ -116,6 +117,14 @@ def _issue_body(value: object) -> str:
     return value
 
 
+def _title(value: object) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str) or len(value) > MAX_TITLE_LENGTH:
+        return _invalid()
+    return value
+
+
 def map_milestone(payload: object) -> GitHubMilestone:
     item = _mapping(payload)
     return GitHubMilestone(
@@ -148,6 +157,7 @@ def map_item(payload: object) -> GitHubItem:
         created_at=_required_timestamp(item.get("created_at")),
         updated_at=_required_timestamp(item.get("updated_at")),
         body=(_issue_body(item.get("body")) if kind is GitHubItemKind.ISSUE else ""),
+        title=_title(item.get("title")),
     )
 
 
@@ -212,6 +222,7 @@ def map_pull_request(payload: object) -> GitHubPullRequest:
         merged_at=_timestamp(item.get("merged_at"), optional=True),
         created_at=_required_timestamp(item.get("created_at")),
         updated_at=_required_timestamp(item.get("updated_at")),
+        title=_title(item.get("title")),
     )
 
 

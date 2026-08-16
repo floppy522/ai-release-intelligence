@@ -91,6 +91,7 @@ class GitHubItem:
     created_at: datetime
     updated_at: datetime
     body: str = ""
+    title: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +120,7 @@ class GitHubPullRequest:
     merged_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    title: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,9 +157,7 @@ class CommitComparison:
 
 
 class GitHubSource(Protocol):
-    async def get_milestone(
-        self, repo: RepoRef, milestone: int
-    ) -> GitHubMilestone: ...
+    async def get_milestone(self, repo: RepoRef, milestone: int) -> GitHubMilestone: ...
 
     async def list_milestone_items(
         self, repo: RepoRef, milestone: int

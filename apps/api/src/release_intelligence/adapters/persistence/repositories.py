@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import replace
@@ -59,8 +58,9 @@ from release_intelligence.ports.repositories import (
     StoredAnalysisRun,
     StoredFindingMetadata,
 )
+from release_intelligence.security.logging import get_safe_logger
 
-logger = logging.getLogger(__name__)
+logger = get_safe_logger(__name__)
 
 
 def reassess_stored_decision(

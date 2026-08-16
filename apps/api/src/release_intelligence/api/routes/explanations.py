@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
@@ -26,8 +25,9 @@ from release_intelligence.ports.ai import (
     ExplanationMetadata,
 )
 from release_intelligence.ports.repositories import IncompatibleSnapshotError
+from release_intelligence.security.logging import get_safe_logger
 
-logger = logging.getLogger(__name__)
+logger = get_safe_logger(__name__)
 router = APIRouter(prefix="/api/analyses", tags=["analyses"])
 
 

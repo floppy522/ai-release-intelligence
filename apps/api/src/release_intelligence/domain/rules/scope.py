@@ -7,7 +7,6 @@ from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from urllib.parse import urlparse
 
 from release_intelligence.domain.models import (
     EvidenceRef,
@@ -23,6 +22,12 @@ from release_intelligence.ports.github import (
     GitHubItem,
     GitHubItemKind,
     GitHubPullRequest,
+)
+from release_intelligence.security.urls import (
+    GitHubEvidenceKind,
+    GitHubEvidenceLocator,
+    InvalidEvidenceURL,
+    parse_github_evidence_url,
 )
 
 _REPOSITORY_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -824,40 +829,44 @@ def _direct_url(repository: str, kind: str, number: int) -> str:
 
 
 def _is_direct_url(url: str, repository: str, kind: str, number: int) -> bool:
-    return _is_canonical_github_url(url, f"/{repository}/{kind}/{number}")
+    expected_kind = {
+        "issues": GitHubEvidenceKind.ISSUE,
+        "pull": GitHubEvidenceKind.PULL,
+        "milestone": GitHubEvidenceKind.MILESTONE,
+    }.get(kind)
+    if expected_kind is None:
+        return False
+    locator = _evidence_locator(url, repository)
+    return (
+        locator is not None
+        and locator.kind is expected_kind
+        and locator.identifiers == (str(number),)
+    )
 
 
 def _is_comparison_url(url: str, repository: str, base_sha: str, head_sha: str) -> bool:
-    return _is_canonical_github_url(
-        url, f"/{repository}/compare/{base_sha}...{head_sha}"
+    locator = _evidence_locator(url, repository)
+    return (
+        locator is not None
+        and locator.kind is GitHubEvidenceKind.COMPARE
+        and locator.identifiers == (base_sha, head_sha)
     )
 
 
 def _is_commit_url(url: str, repository: str, sha: str) -> bool:
-    return _is_canonical_github_url(url, f"/{repository}/commit/{sha}")
-
-
-def _is_canonical_github_url(url: str, expected_path: str) -> bool:
-    try:
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-        port = parsed.port
-        username = parsed.username
-        password = parsed.password
-    except (UnicodeError, ValueError):
-        return False
+    locator = _evidence_locator(url, repository)
     return (
-        parsed.scheme == "https"
-        and parsed.netloc == "github.com"
-        and hostname == "github.com"
-        and port is None
-        and username is None
-        and password is None
-        and parsed.path == expected_path
-        and not parsed.params
-        and not parsed.query
-        and not parsed.fragment
+        locator is not None
+        and locator.kind is GitHubEvidenceKind.COMMIT
+        and locator.identifiers == (sha,)
     )
+
+
+def _evidence_locator(url: object, repository: object) -> GitHubEvidenceLocator | None:
+    try:
+        return parse_github_evidence_url(url, expected_repo=repository)
+    except InvalidEvidenceURL:
+        return None
 
 
 def _is_repository_name(repository: object) -> bool:

@@ -9,7 +9,6 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
-from urllib.parse import urlparse
 
 from release_intelligence.domain.models import (
     EvidenceRef,
@@ -19,6 +18,11 @@ from release_intelligence.domain.models import (
 )
 from release_intelligence.domain.policy import CheckCategory, ReleasePolicy
 from release_intelligence.ports.github import GitHubCheck
+from release_intelligence.security.urls import (
+    GitHubEvidenceKind,
+    InvalidEvidenceURL,
+    parse_github_evidence_url,
+)
 
 _REPOSITORY_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -513,26 +517,13 @@ def _is_aware(value: object) -> bool:
 
 
 def _is_check_url(url: str, repository: str, run_id: int) -> bool:
-    path = _canonical_github_path(url)
-    if path is None:
+    try:
+        locator = parse_github_evidence_url(url, expected_repo=repository)
+    except InvalidEvidenceURL:
         return False
-    if path == f"/{repository}/runs/{run_id}":
-        return True
-    prefix = f"/{repository}/"
-    if not path.startswith(prefix):
-        return False
-    parts = path.removeprefix(prefix).split("/")
-    if len(parts) == 4 and parts[:1] == ["runs"] and parts[2] == "jobs":
-        workflow_id, final_id = parts[1], parts[3]
-    elif (
-        len(parts) == 5
-        and parts[:2] == ["actions", "runs"]
-        and parts[3] in {"job", "jobs"}
-    ):
-        workflow_id, final_id = parts[2], parts[4]
-    else:
-        return False
-    return _is_bounded_decimal(workflow_id) and _is_bounded_decimal(final_id)
+    if locator.kind is GitHubEvidenceKind.CHECK_RUN:
+        return locator.identifiers == (str(run_id),)
+    return locator.kind is GitHubEvidenceKind.ACTIONS_JOB
 
 
 def _is_bounded_decimal(value: str) -> bool:
@@ -546,32 +537,6 @@ def _is_bounded_decimal(value: str) -> bool:
             or (len(value) == len(maximum) and value <= maximum)
         )
     )
-
-
-def _canonical_github_path(url: object) -> str | None:
-    if not isinstance(url, str):
-        return None
-    try:
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-        port = parsed.port
-        username = parsed.username
-        password = parsed.password
-    except (UnicodeError, ValueError):
-        return None
-    if not (
-        parsed.scheme == "https"
-        and parsed.netloc == "github.com"
-        and hostname == "github.com"
-        and port is None
-        and username is None
-        and password is None
-        and not parsed.params
-        and not parsed.query
-        and not parsed.fragment
-    ):
-        return None
-    return parsed.path
 
 
 def _jsonable(value: object) -> object:

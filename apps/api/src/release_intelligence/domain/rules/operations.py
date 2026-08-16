@@ -13,9 +13,7 @@ from release_intelligence.domain.policy import ReleasePolicy
 from release_intelligence.domain.rules.blockers import _analyze_issue_evidence
 from release_intelligence.domain.rules.checks import (
     _analyze_evidence,
-    _canonical_github_path,
     _check_evidence,
-    _is_bounded_decimal,
     _is_success,
 )
 from release_intelligence.domain.rules.scope import (
@@ -24,6 +22,11 @@ from release_intelligence.domain.rules.scope import (
     _prerequisite_error_codes,
 )
 from release_intelligence.ports.github import GitHubItem
+from release_intelligence.security.urls import (
+    GitHubEvidenceKind,
+    InvalidEvidenceURL,
+    parse_github_evidence_url,
+)
 
 _FIELDS = (
     "Before release",
@@ -337,24 +340,14 @@ def _evaluate_migration(
 
 
 def _is_connected_check_url(url: str, repository: str) -> bool:
-    path = _canonical_github_path(url)
-    if path is None:
+    try:
+        locator = parse_github_evidence_url(url, expected_repo=repository)
+    except InvalidEvidenceURL:
         return False
-    prefix = f"/{repository}/"
-    if not path.startswith(prefix):
-        return False
-    parts = path.removeprefix(prefix).split("/")
-    if len(parts) == 2 and parts[0] == "runs":
-        return _is_bounded_decimal(parts[1])
-    if len(parts) == 4 and parts[0] == "runs" and parts[2] == "jobs":
-        return _is_bounded_decimal(parts[1]) and _is_bounded_decimal(parts[3])
-    return (
-        len(parts) == 5
-        and parts[:2] == ["actions", "runs"]
-        and parts[3] in {"job", "jobs"}
-        and _is_bounded_decimal(parts[2])
-        and _is_bounded_decimal(parts[4])
-    )
+    return locator.kind in {
+        GitHubEvidenceKind.CHECK_RUN,
+        GitHubEvidenceKind.ACTIONS_JOB,
+    }
 
 
 def _finding(
