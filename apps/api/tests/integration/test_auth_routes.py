@@ -382,6 +382,48 @@ async def test_current_user_comes_from_server_side_session(
     assert response.json() == {"id": "github:7", "login": "octocat"}
 
 
+async def test_authenticated_csrf_bootstrap_recovers_session_token_and_is_never_cached(
+    client: httpx.AsyncClient,
+    store: FakeAuthStore,
+) -> None:
+    login_token, _ = await _login(client)
+
+    response = await client.get("/api/auth/csrf")
+
+    assert response.status_code == 200
+    bootstrap_token = response.json()["csrf_token"]
+    assert bootstrap_token == login_token
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
+    session = next(iter(store.sessions.values()))
+    assert session.csrf_token_hash == token_digest(bootstrap_token)
+    assert bootstrap_token not in repr(store.sessions)
+    accepted = await client.post(
+        "/api/auth/logout", headers={"X-CSRF-Token": bootstrap_token}
+    )
+    assert accepted.status_code == 204
+
+
+async def test_csrf_bootstrap_requires_session_and_rejects_digest_mismatch(
+    client: httpx.AsyncClient,
+    store: FakeAuthStore,
+) -> None:
+    anonymous = await client.get("/api/auth/csrf")
+    await _login(client)
+    session_hash, session = next(iter(store.sessions.items()))
+    store.sessions[session_hash] = SessionRecord(
+        user_id=session.user_id,
+        token_hash=session.token_hash,
+        csrf_token_hash=token_digest("a-different-csrf-token"),
+        expires_at=session.expires_at,
+    )
+    failed = await client.get("/api/auth/csrf")
+
+    assert anonymous.status_code == 401
+    assert failed.status_code == 401
+    assert failed.json() == {"detail": "Session is invalid or expired"}
+
+
 async def test_unsafe_method_requires_csrf_token_bound_to_session(
     client: httpx.AsyncClient,
 ) -> None:

@@ -19,6 +19,11 @@ export function FindingCard({ finding, repositoryFullName }: FindingCardProps) {
       <p className="finding-card__summary">
         <strong>{finding.summary}</strong>
       </p>
+      {finding.severity === "INSUFFICIENT_DATA" ? (
+        <p className="finding-card__state">
+          Readiness cannot be determined from this evidence.
+        </p>
+      ) : null}
       {evidenceUrl ? (
         <a href={evidenceUrl} target="_blank" rel="noreferrer">
           Open evidence
@@ -112,5 +117,6 @@ function matchesEvidencePath(sourceType: string, path: readonly string[]): boole
 function severityLabel(severity: string): string {
   if (severity === "BLOCKING") return "Blocking";
   if (severity === "DECISION_REQUIRED") return "Decision required";
+  if (severity === "INSUFFICIENT_DATA") return "Insufficient data";
   return "Advisory";
 }

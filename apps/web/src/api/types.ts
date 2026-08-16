@@ -46,6 +46,10 @@ export interface AnalysisRun {
   findings: readonly ReadinessFinding[];
 }
 
+export interface CsrfBootstrap {
+  csrf_token: string;
+}
+
 export interface DecisionCreatePayload {
   finding_id: string;
   fingerprint: string;

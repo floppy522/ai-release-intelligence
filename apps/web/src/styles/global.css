@@ -155,6 +155,11 @@ main {
   border-left: 0.3rem solid var(--color-decision);
 }
 
+.finding-card[data-severity="INSUFFICIENT_DATA"] {
+  border-left: 0.3rem solid var(--color-insufficient);
+  background: var(--color-soft-slate);
+}
+
 .finding-card__meta {
   display: flex;
   flex-wrap: wrap;
@@ -172,6 +177,19 @@ main {
 
 .finding-card__summary {
   margin-bottom: var(--space-2);
+}
+
+.finding-card__state {
+  color: var(--color-insufficient);
+  font-weight: 700;
+}
+
+.demo-banner {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-decision);
+  border-radius: var(--radius-small);
+  background: var(--color-soft-amber);
+  color: var(--color-ink);
 }
 
 .action-list,

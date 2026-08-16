@@ -26,12 +26,15 @@ from release_intelligence.api.dependencies import (
     get_cipher,
     get_clock,
     get_oauth_gateway,
+    get_session_context,
     require_repository_access,
     validate_csrf,
 )
 from release_intelligence.ports.auth import AuthPersistenceError
 from release_intelligence.security.crypto import (
     CredentialCipher,
+    csrf_token_for_session,
+    digest_matches,
     generate_opaque_token,
     token_digest,
 )
@@ -52,6 +55,10 @@ class CurrentUserResponse(BaseModel):
 
     id: str
     login: str
+
+
+class CsrfBootstrapResponse(BaseModel):
+    csrf_token: str
 
 
 class RepositoryResponse(BaseModel):
@@ -106,9 +113,7 @@ async def github_callback(
     lifetimes: Annotated[AuthLifetimes, Depends(get_auth_lifetimes)],
     code: Annotated[str | None, Query()] = None,
     state_value: Annotated[str | None, Query(alias="state")] = None,
-    oauth_binding: Annotated[
-        str | None, Cookie(alias=OAUTH_BINDING_COOKIE)
-    ] = None,
+    oauth_binding: Annotated[str | None, Cookie(alias=OAUTH_BINDING_COOKIE)] = None,
 ) -> JSONResponse:
     if (
         code is None
@@ -154,7 +159,7 @@ async def github_callback(
     user = CurrentUser(id=identity.user_id, login=identity.login)
 
     session_token = generate_opaque_token()
-    csrf_token = generate_opaque_token()
+    csrf_token = csrf_token_for_session(session_token)
     try:
         await store.complete_oauth_login(
             user,
@@ -190,6 +195,28 @@ async def github_callback(
 @router.get("/auth/me", response_model=CurrentUserResponse)
 async def current_user(user: CurrentUserDependency) -> CurrentUser:
     return user
+
+
+@router.get("/auth/csrf", response_model=CsrfBootstrapResponse)
+async def csrf_bootstrap(
+    context: Annotated[SessionContext, Depends(get_session_context)],
+    session_token: Annotated[str | None, Cookie(alias="session")] = None,
+) -> JSONResponse:
+    if not session_token:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Authentication required")
+    csrf_token = csrf_token_for_session(session_token)
+    if not digest_matches(csrf_token, context.session.csrf_token_hash):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "Session is invalid or expired"
+        )
+    return JSONResponse(
+        CsrfBootstrapResponse(csrf_token=csrf_token).model_dump(),
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "Referrer-Policy": "no-referrer",
+        },
+    )
 
 
 @router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)

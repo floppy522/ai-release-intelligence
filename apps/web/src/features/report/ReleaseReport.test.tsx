@@ -165,7 +165,7 @@ it("renders safe insufficiency codes beside carried business findings", () => {
       },
     ],
   } as const;
-  renderWithQueryClient(
+  const { container } = renderWithQueryClient(
     <ReleaseReport
       assessment={{ status: "INSUFFICIENT_DATA", findings: [BLOCKER, reason] }}
       repositoryFullName="example/release-demo"
@@ -173,6 +173,15 @@ it("renders safe insufficiency codes beside carried business findings", () => {
   );
 
   expect(screen.getAllByText(/snapshot\.stale/).length).toBeGreaterThan(0);
+  expect(screen.getByText("Insufficient data")).toBeInTheDocument();
+  expect(
+    screen.getByText("Readiness cannot be determined from this evidence."),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("Advisory")).not.toBeInTheDocument();
+  expect(
+    container.querySelector('.finding-card[data-severity="INSUFFICIENT_DATA"]'),
+  ).not.toBeNull();
+  expect(screen.queryByRole("button", { name: "Accept risk" })).toBeNull();
 });
 
 it("handles all statuses and empty sections without a false clean claim", () => {
@@ -187,11 +196,12 @@ it("handles all statuses and empty sections without a false clean claim", () => 
   ] as const;
 
   for (const [status, message] of cases) {
-    const { unmount } = renderWithQueryClient(
+    const { container, unmount } = renderWithQueryClient(
       <ReleaseReport assessment={{ status, findings: [] }} />,
     );
     expect(screen.getByText(status.replaceAll("_", " "))).toBeInTheDocument();
     expect(screen.getByText(message)).toBeInTheDocument();
+    expect(container.querySelector(`[data-status="${status}"]`)).not.toBeNull();
     unmount();
   }
 });

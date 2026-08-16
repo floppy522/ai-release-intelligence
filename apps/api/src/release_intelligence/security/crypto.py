@@ -35,6 +35,13 @@ def generate_opaque_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def csrf_token_for_session(session_token: str) -> str:
+    """Derive domain-separated CSRF material from an opaque session bearer."""
+    return hashlib.sha256(
+        f"release-intelligence:csrf:{session_token}".encode()
+    ).hexdigest()
+
+
 def token_digest(token: str) -> str:
     """Persist only a one-way digest of high-entropy bearer material."""
     return hashlib.sha256(token.encode()).hexdigest()

@@ -18,6 +18,7 @@ interface ReleaseReportProps {
   runId?: string;
   actor?: string;
   csrfToken?: string;
+  demo?: boolean;
   onDecisionRecorded?: () => void;
 }
 
@@ -29,6 +30,7 @@ export function ReleaseReport({
   runId = "",
   actor,
   csrfToken = "",
+  demo = false,
   onDecisionRecorded,
 }: ReleaseReportProps) {
   const sectionId = useId();
@@ -43,6 +45,11 @@ export function ReleaseReport({
 
   return (
     <main className="release-report">
+      {demo ? (
+        <aside className="demo-banner" aria-label="Demo fixture warning">
+          <strong>Demo fixture data</strong> — not a production readiness assessment.
+        </aside>
+      ) : null}
       <header className="verdict-panel" data-status={assessment.status}>
         <div>
           <p className="eyebrow">Release readiness</p>

@@ -1,19 +1,24 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
 
-import { getAnalysisRun, getDemoAnalysis, recordDecision } from "../api/client";
+import {
+  getAnalysisRun,
+  getCsrfBootstrap,
+  getDemoAnalysis,
+  recordDecision,
+} from "../api/client";
 import { renderWithQueryClient } from "../test/render";
 import { App } from "./App";
 
 vi.mock("../api/client", () => ({
   getDemoAnalysis: vi.fn(),
   getAnalysisRun: vi.fn(),
+  getCsrfBootstrap: vi.fn(),
   recordDecision: vi.fn(),
 }));
 
 afterEach(() => {
   window.history.replaceState(null, "", "/");
-  document.querySelector('meta[name="csrf-token"]')?.remove();
   vi.clearAllMocks();
 });
 
@@ -38,17 +43,29 @@ const NOT_READY_FIXTURE = {
   ],
 } as const;
 
-it("shows the verdict, blocker, action, and evidence link", async () => {
+it("shows explicitly requested demo data with a visible fixture warning", async () => {
+  window.history.replaceState(null, "", "/?demo=fixture");
   vi.mocked(getDemoAnalysis).mockResolvedValue(NOT_READY_FIXTURE);
 
   renderWithQueryClient(<App />);
 
   expect(await screen.findByText("NOT READY")).toBeInTheDocument();
   expect(screen.getByText("Issue #142 has no linked PR")).toBeInTheDocument();
+  expect(screen.getByText(/demo fixture data/i)).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Open evidence" })).toHaveAttribute(
     "href",
     "https://github.com/example/release-demo/issues/142",
   );
+});
+
+it("does not silently load fixture data on the default route", () => {
+  renderWithQueryClient(<App />);
+
+  expect(screen.getByRole("heading", { name: "Release intelligence" })).toBeInTheDocument();
+  expect(screen.getByText(/open an analysis run/i)).toBeInTheDocument();
+  expect(getDemoAnalysis).not.toHaveBeenCalled();
+  expect(getAnalysisRun).not.toHaveBeenCalled();
+  expect(screen.queryByText("READY")).toBeNull();
 });
 
 it("loads a real analysis-run DTO and wires authoritative decision controls", async () => {
@@ -56,10 +73,7 @@ it("loads a real analysis-run DTO and wires authoritative decision controls", as
   const findingId = "20000000-0000-0000-0000-000000000002";
   const fingerprint = `sha256:${"a".repeat(64)}`;
   window.history.replaceState(null, "", `/?analysis_run_id=${runId}`);
-  const csrf = document.createElement("meta");
-  csrf.name = "csrf-token";
-  csrf.content = "real-csrf-token";
-  document.head.append(csrf);
+  vi.mocked(getCsrfBootstrap).mockResolvedValue({ csrf_token: "real-csrf-token" });
   vi.mocked(getAnalysisRun).mockResolvedValue({
     run_id: runId,
     status: "NEEDS_DECISION",
@@ -106,6 +120,7 @@ it("loads a real analysis-run DTO and wires authoritative decision controls", as
 
   expect(await screen.findByText("NEEDS DECISION")).toBeInTheDocument();
   expect(getAnalysisRun).toHaveBeenCalledWith(runId);
+  expect(getCsrfBootstrap).toHaveBeenCalledOnce();
   expect(screen.getByRole("button", { name: "Accept risk" })).toBeInTheDocument();
   expect(screen.getByText(fingerprint)).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("Decision reason"), {
@@ -129,4 +144,34 @@ it("loads a real analysis-run DTO and wires authoritative decision controls", as
       "real-csrf-token",
     ),
   );
+});
+
+it.each(["bootstrap failure", "empty bootstrap token"] as const)("fails closed when %s prevents authenticated CSRF bootstrap", async (caseName) => {
+  window.history.replaceState(
+    null,
+    "",
+    "/?analysis_run_id=10000000-0000-0000-0000-000000000001",
+  );
+  vi.mocked(getAnalysisRun).mockResolvedValue({
+    run_id: "10000000-0000-0000-0000-000000000001",
+    status: "READY",
+    release_name: "Milestone 7",
+    repository_id: "987654",
+    repository_full_name: "acme/widgets",
+    source_fetched_at: "2026-08-07T14:30:00Z",
+    findings: [],
+  });
+  if (caseName === "bootstrap failure") {
+    vi.mocked(getCsrfBootstrap).mockRejectedValue(
+      new Error("session unavailable"),
+    );
+  } else {
+    vi.mocked(getCsrfBootstrap).mockResolvedValue({ csrf_token: "" });
+  }
+
+  renderWithQueryClient(<App />);
+
+  expect(await screen.findByText(/secure session unavailable/i)).toBeInTheDocument();
+  expect(screen.queryByText("READY")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Accept risk" })).toBeNull();
 });

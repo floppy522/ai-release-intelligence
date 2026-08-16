@@ -1,5 +1,6 @@
 import type {
   AnalysisRun,
+  CsrfBootstrap,
   DecisionCreatePayload,
   HumanDecisionRecord,
   PolicyRecord,
@@ -29,6 +30,26 @@ export async function getAnalysisRun(runId: string): Promise<AnalysisRun> {
   });
   if (!response.ok) throw new ApiError(response.status);
   return (await response.json()) as AnalysisRun;
+}
+
+export async function getCsrfBootstrap(): Promise<CsrfBootstrap> {
+  const response = await fetch("/api/auth/csrf", {
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  if (!response.ok) throw new ApiError(response.status);
+  const payload: unknown = await response.json();
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    !("csrf_token" in payload) ||
+    typeof payload.csrf_token !== "string" ||
+    payload.csrf_token.length === 0 ||
+    payload.csrf_token.length > 1_024
+  ) {
+    throw new Error("CSRF bootstrap response was invalid");
+  }
+  return { csrf_token: payload.csrf_token };
 }
 
 export async function getReleasePolicy(

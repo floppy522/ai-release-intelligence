@@ -3,8 +3,8 @@
 ## Status
 
 Implemented the deterministic release assessment and decision-first report, then
-completed fix round 1/5 for the six Important review findings. Readiness remains
-strictly rule-based with fixed precedence:
+completed fix rounds 1 and 2 for all reported Important review findings. Readiness
+remains strictly rule-based with fixed precedence:
 
 1. `INSUFFICIENT_DATA` for incomplete, invalid, inconsistent, or stale evidence;
 2. `NOT_READY` for any deterministic or human-marked blocker;
@@ -54,8 +54,35 @@ No numeric score or AI output participates in the result.
   analysis-run DTO.
 - Focused report plus App coverage is 21 passed, followed by a clean TypeScript
   check.
-- Full frontend coverage is 39 passed across four files; TypeScript, ESLint, and
+- Full frontend coverage is 45 passed across five files; TypeScript, ESLint, and
   the Vite production build pass.
+
+### Fix round 2: insufficiency presentation and authenticated CSRF bootstrap
+
+- Focused backend RED was exactly two failures: the missing `/api/auth/csrf`
+  route returned 404 where an authenticated request required 200 and an anonymous
+  request required 401. Focused backend GREEN is 4 passed with 9 deselected,
+  covering bootstrap success, digest mismatch, callback issuance, and unsafe-method
+  validation.
+- The login callback and bootstrap endpoint server-derive domain-separated CSRF
+  material from the high-entropy HttpOnly session token. Persistence retains only
+  its digest. Bootstrap authenticates the session, verifies the stored digest, and
+  returns the raw token only in a `no-store`, `no-cache`, `no-referrer` response.
+  The endpoint does not rotate or persist raw material, so a safe GET cannot be
+  abused to invalidate another browser's active form.
+- Focused frontend RED had nine behavior failures across the initially missing
+  client bootstrap, incorrect insufficiency label, implicit demo route, absent demo
+  warning, and App's missing fail-closed bootstrap handling. Focused GREEN is 27
+  passed across three files.
+- `INSUFFICIENT_DATA` findings now carry an explicit “Insufficient data” label,
+  explanatory readiness text, and distinct slate treatment. In mixed
+  business-plus-insufficiency reports they are never presented as advisory or
+  decision eligible.
+- App now requires both a real `analysis_run_id` and an authenticated server CSRF
+  bootstrap before rendering a production report. Bootstrap failures and empty
+  tokens fail closed. Fixture data loads only for exact `?demo=fixture`, with a
+  visible non-production warning; the default route is a neutral landing state and
+  never silently shows a READY fixture.
 
 ## Backend design
 
@@ -88,9 +115,11 @@ No numeric score or AI output participates in the result.
 - The semantic order remains verdict/freshness, What requires attention, Required
   actions, Decisions, and Supporting details, with no readiness score.
 - App uses `analysis_run_id` as explicit navigation state for the real
-  `/api/analyses/{run_id}` DTO. It uses the bootstrapped CSRF meta value and real
-  server run/finding/fingerprint values; a successful decision refetches the run.
-  The no-query demo remains an explicit trusted fixture path.
+  `/api/analyses/{run_id}` DTO. It fetches CSRF material from the authenticated
+  same-origin `/api/auth/csrf` bootstrap and uses real server
+  run/finding/fingerprint values; a successful decision refetches the run. The
+  trusted fixture is isolated behind explicit `?demo=fixture` navigation and is
+  visibly labeled.
 - Decision forms render only when overall status is `NEEDS_DECISION`, the server
   marks the exact finding eligible, and real UUID/fingerprint/CSRF values are
   present. Blocked, insufficient, stale, or malformed findings never get controls.
@@ -105,18 +134,20 @@ No numeric score or AI output participates in the result.
 
 ## Verification
 
-- Backend unit/contract: 584 passed, `-W error --hypothesis-seed=0`.
-- Non-database route integration: 44 passed, `-W error`.
+- Backend unit/contract/non-database integration: 630 passed,
+  `-W error --hypothesis-seed=0`.
+- Non-database route integration: 46 passed, `-W error`.
 - Backend Ruff: passed.
 - Strict mypy: passed for 38 source files.
-- Scoped Ruff formatting: 12 modified Python files formatted.
-- Frontend Vitest: 39 passed across four files.
+- Scoped Ruff formatting: modified Python files formatted.
+- Frontend Vitest: 45 passed across five files.
 - Frontend TypeScript, ESLint, and Vite build: passed.
 - `uv lock --check --offline`: 48 packages resolved.
 - `pnpm install --frozen-lockfile --offline`: up to date.
 - Offline PostgreSQL SQL generation: `0001_initial:head` upgrade and
   `head:0001_initial` downgrade passed.
-- PostgreSQL integration collection: 20 analysis/decision contracts.
+- PostgreSQL integration collection: 33 repository/migration contracts; this
+  round changes no persistence contract or schema.
 - `git diff --check`: passed.
 
 ## Concerns
