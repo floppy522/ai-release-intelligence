@@ -4,9 +4,10 @@
   "title": "Release benchmark claim review",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "decisions"],
+  "required": ["version", "packet_hash", "decisions"],
   "properties": {
     "version": {"type": "string", "pattern": "^[1-9][0-9]{0,2}\\.[0-9]{1,3}\\.[0-9]{1,3}$"},
+    "packet_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "decisions": {
       "type": "array",
       "maxItems": 1000,
@@ -17,8 +18,8 @@
         "properties": {
           "claim_id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,99}$"},
           "verdict": {"enum": ["supported", "unsupported"]},
-          "reviewer": {"type": "string", "minLength": 1, "maxLength": 255},
-          "rationale": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "reviewer": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": ".*\\S.*"},
+          "rationale": {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": ".*\\S.*"},
           "reviewed_at": {"type": "string", "format": "date-time"}
         }
       }

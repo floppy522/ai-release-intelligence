@@ -23,10 +23,14 @@ critical recall = 1.0, risk precision >= 0.95, evidence coverage = 1.0, and
 invalid evidence rate = 0.0. `unsupported_claim_rate` remains `null` until a
 complete human review exists.
 
-AI prose must first be split into atomic claims. A claims JSON document includes
-one stable `claim_id`, one single-line statement, and one or more cited
-deterministic facts per claim. Review every claim with the schema in
-`reviews/schema.json`, then run:
+Export each validated Task 13 `AIExplanation` with `export_claim_packet`. The
+canonical JSON packet embeds its immutable `ExplanationInput`, validated
+explanation, content-addressed atomic claims, and a hash of the entire packet.
+Every prose-bearing explanation field becomes a claim whose cited finding and
+evidence facts must exactly match the embedded source. The review document must
+carry that exact `packet_hash`, preventing decisions from being reused after
+any source, explanation, claim, or scenario change. Review every claim with the
+schema in `reviews/schema.json`, then run:
 
 ```bash
 uv run python -m release_intelligence.benchmark.review \

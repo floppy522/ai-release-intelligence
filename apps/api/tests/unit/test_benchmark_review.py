@@ -1,51 +1,84 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from release_intelligence.application.explanations import ExplanationValidator
 from release_intelligence.benchmark.review import (
     AtomicClaim,
-    CitedFact,
     ClaimReview,
     ClaimsDocument,
     ReviewDocument,
     evaluate_review,
+    export_claim_packet,
     main,
     stable_claim_id,
+)
+from release_intelligence.ports.ai import (
+    AIExplanation,
+    ExplanationAction,
+    ExplanationEvidence,
+    ExplanationFinding,
+    ExplanationGroup,
+    ExplanationInput,
 )
 
 
 def _claims() -> ClaimsDocument:
-    first_fact = CitedFact(
-        scenario_id="critical-check",
-        rule_id="checks.blocking_not_successful",
-        source_id="101",
-        evidence_ids=("github-check-101",),
-    )
-    second_fact = CitedFact(
-        scenario_id="critical-check",
-        rule_id="release.status",
-        source_id="critical-check",
-        evidence_ids=("github-check-101",),
-    )
-    return ClaimsDocument(
-        version="1.0.0",
-        claims=(
-            AtomicClaim(
-                claim_id=stable_claim_id("Blocking check failed.", (first_fact,)),
-                text="Blocking check failed.",
-                cited_facts=(first_fact,),
-            ),
-            AtomicClaim(
-                claim_id=stable_claim_id("Release is not ready.", (second_fact,)),
-                text="Release is not ready.",
-                cited_facts=(second_fact,),
+    source = ExplanationInput(
+        deterministic_status="NOT_READY",
+        release_name="Release 2026.08.17",
+        source_fetched_at="2026-08-16T12:00:00+00:00",
+        findings=(
+            ExplanationFinding(
+                finding_id="finding-1",
+                rule_id="checks.blocking_not_successful",
+                severity="BLOCKING",
+                summary="Blocking check failed",
+                required_action="Fix the blocking check",
+                evidence=(
+                    ExplanationEvidence(
+                        evidence_id="github-check-101",
+                        source_type="github_check_run",
+                        source_id="101",
+                    ),
+                ),
             ),
         ),
+        limitations=("Deterministic readiness remains authoritative.",),
+    )
+    raw = AIExplanation(
+        summary="model prose is replaced",
+        groups=(
+            ExplanationGroup(
+                title="blocking check",
+                explanation="blocking check",
+                severity="BLOCKING",
+                finding_ids=("finding-1",),
+                evidence_ids=("github-check-101",),
+            ),
+        ),
+        actions=(
+            ExplanationAction(
+                action="Fix the blocking check",
+                finding_ids=("finding-1",),
+                evidence_ids=("github-check-101",),
+            ),
+        ),
+        limitations=source.limitations,
+        confidence="LOW",
+        finding_ids=("finding-1",),
+        evidence_ids=("github-check-101",),
+    )
+    return export_claim_packet(
+        scenario_id="critical-check",
+        source=source,
+        explanation=ExplanationValidator(source).validate(raw),
     )
 
 
@@ -64,40 +97,45 @@ def _decision(claim_id: str, verdict: str = "supported") -> dict[str, object]:
 
 
 def test_claim_identity_is_content_addressed_from_text_and_cited_facts() -> None:
-    fact = CitedFact(
-        scenario_id="critical-check",
-        rule_id="checks.blocking_not_successful",
-        source_id="101",
-        evidence_ids=("github-check-101",),
-    )
+    fact = _claims().claims[0].cited_facts[0]
 
     with pytest.raises(ValidationError):
         AtomicClaim(
             claim_id="claim-arbitrary",
+            kind="summary",
             text="Blocking check failed.",
             cited_facts=(fact,),
         )
-    identifier = stable_claim_id("Blocking check failed.", (fact,))
+    identifier = stable_claim_id("summary", "Blocking check failed.", (fact,))
     claim = AtomicClaim(
         claim_id=identifier,
+        kind="summary",
         text="Blocking check failed.",
         cited_facts=(fact,),
     )
 
     assert claim.claim_id == identifier
-    assert stable_claim_id("A different claim.", (fact,)) != identifier
+    assert stable_claim_id("summary", "A different claim.", (fact,)) != identifier
 
 
 def test_atomic_claim_requires_nonempty_cited_facts_and_stable_unique_id() -> None:
+    fact = _claims().claims[0].cited_facts[0]
     with pytest.raises(ValidationError):
-        ClaimsDocument.model_validate(
+        AtomicClaim.model_validate(
             {
-                "version": "1.0.0",
-                "claims": [
-                    {"claim_id": "claim-1", "text": "Unsupported by construction."},
-                    {"claim_id": "claim-1", "text": "Duplicate."},
-                ],
+                "claim_id": "claim-1",
+                "kind": "summary",
+                "text": "Unsupported by construction.",
+                "cited_facts": [],
             }
+        )
+    identifier = stable_claim_id("summary", "Duplicate fact.", (fact, fact))
+    with pytest.raises(ValidationError):
+        AtomicClaim(
+            claim_id=identifier,
+            kind="summary",
+            text="Duplicate fact.",
+            cited_facts=(fact, fact),
         )
 
 
@@ -122,7 +160,11 @@ def test_review_decision_requires_identity_rationale_and_aware_timestamp(
 def test_missing_review_is_failed_not_zero_unsupported_rate() -> None:
     claims = _claims()
     review = ReviewDocument.model_validate(
-        {"version": "1.0.0", "decisions": [_decision(_claim_id(1))]}
+        {
+            "version": "1.0.0",
+            "packet_hash": claims.packet_hash,
+            "decisions": [_decision(_claim_id(1))],
+        }
     )
 
     result = evaluate_review(claims, review)
@@ -130,18 +172,22 @@ def test_missing_review_is_failed_not_zero_unsupported_rate() -> None:
     assert result.complete is False
     assert result.accepted is False
     assert result.unsupported_claim_rate is None
-    assert result.missing_claim_ids == (_claim_id(2),)
+    assert result.missing_claim_ids == tuple(
+        sorted({claim.claim_id for claim in claims.claims} - {_claim_id(1)})
+    )
 
 
 def test_any_unsupported_claim_fails_and_rate_uses_all_reviewed_claims() -> None:
     claims = _claims()
+    decisions = [
+        _decision(claim.claim_id, "unsupported" if index == 0 else "supported")
+        for index, claim in enumerate(claims.claims)
+    ]
     review = ReviewDocument.model_validate(
         {
             "version": "1.0.0",
-            "decisions": [
-                _decision(_claim_id(2), "unsupported"),
-                _decision(_claim_id(1)),
-            ],
+            "packet_hash": claims.packet_hash,
+            "decisions": list(reversed(decisions)),
         }
     )
 
@@ -149,9 +195,9 @@ def test_any_unsupported_claim_fails_and_rate_uses_all_reviewed_claims() -> None
 
     assert result.complete is True
     assert result.accepted is False
-    assert result.unsupported_claim_rate == 0.5
+    assert result.unsupported_claim_rate == 1 / len(claims.claims)
     assert [decision.claim_id for decision in result.decisions] == sorted(
-        (_claim_id(1), _claim_id(2))
+        claim.claim_id for claim in claims.claims
     )
 
 
@@ -161,11 +207,16 @@ def test_duplicate_conflicting_or_unknown_decisions_are_rejected() -> None:
         ReviewDocument.model_validate(
             {
                 "version": "1.0.0",
+                "packet_hash": claims.packet_hash,
                 "decisions": [_decision(_claim_id(1)), _decision(_claim_id(1))],
             }
         )
     unknown = ReviewDocument.model_validate(
-        {"version": "1.0.0", "decisions": [_decision("not-a-claim")]}
+        {
+            "version": "1.0.0",
+            "packet_hash": claims.packet_hash,
+            "decisions": [_decision("not-a-claim")],
+        }
     )
     with pytest.raises(ValueError, match="unknown claim"):
         evaluate_review(claims, unknown)
@@ -176,7 +227,8 @@ def test_claim_and_review_versions_must_match() -> None:
     review = ReviewDocument.model_validate(
         {
             "version": "2.0.0",
-            "decisions": [_decision(_claim_id(1)), _decision(_claim_id(2))],
+            "packet_hash": claims.packet_hash,
+            "decisions": [_decision(claim.claim_id) for claim in claims.claims],
         }
     )
 
@@ -187,11 +239,13 @@ def test_claim_and_review_versions_must_match() -> None:
 def test_review_cli_returns_nonzero_for_incomplete_and_unsupported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    claims = _claims()
     claims_path = tmp_path / "claims.json"
-    claims_path.write_text(_claims().model_dump_json())
+    claims_path.write_text(claims.model_dump_json())
     review_path = tmp_path / "review.yaml"
     review_path.write_text(
         "version: 1.0.0\n"
+        f"packet_hash: '{claims.packet_hash}'\n"
         "decisions:\n"
         f"  - claim_id: {_claim_id(1)}\n"
         "    verdict: unsupported\n"
@@ -242,17 +296,59 @@ def test_review_cli_rejects_oversized_claim_export_without_echoing_it(
     assert "secret" not in captured.err
 
 
+def test_review_cli_rejects_arbitrary_prebuilt_claims(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    claims_path = tmp_path / "claims.json"
+    claims_path.write_text(
+        json.dumps(
+            {
+                "version": "1.0.0",
+                "claims": [
+                    {
+                        "claim_id": "claim-arbitrary",
+                        "kind": "summary",
+                        "text": "Trust this claim without source artifacts.",
+                        "cited_facts": [],
+                    }
+                ],
+            }
+        )
+    )
+    review_path = tmp_path / "review.yaml"
+    review_path.write_text("version: 1.0.0\ndecisions: []\n")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "benchmark-review",
+            "--claims",
+            str(claims_path),
+            "--review",
+            str(review_path),
+        ],
+    )
+
+    assert main() == 2
+    assert capsys.readouterr().err == "benchmark review input is invalid\n"
+
+
 def test_complete_supported_review_cli_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    claims = _claims()
     claims_path = tmp_path / "claims.json"
-    claims_path.write_text(_claims().model_dump_json())
+    claims_path.write_text(claims.model_dump_json())
     review_path = tmp_path / "review.json"
     review_path.write_text(
         json.dumps(
             {
                 "version": "1.0.0",
-                "decisions": [_decision(_claim_id(2)), _decision(_claim_id(1))],
+                "packet_hash": claims.packet_hash,
+                "decisions": [
+                    _decision(claim.claim_id) for claim in reversed(claims.claims)
+                ],
             }
         )
     )
@@ -272,3 +368,15 @@ def test_complete_supported_review_cli_is_idempotent(
     assert main() == 0
     second = capsys.readouterr().out
     assert first == second
+
+
+def test_review_json_schema_rejects_whitespace_only_human_fields() -> None:
+    schema = json.loads(
+        (Path(__file__).parents[4] / "benchmarks/reviews/schema.json").read_text()
+    )
+    properties = schema["properties"]["decisions"]["items"]["properties"]
+
+    for field in ("reviewer", "rationale"):
+        pattern = properties[field]["pattern"]
+        assert re.fullmatch(pattern, "   ") is None
+        assert re.fullmatch(pattern, "reviewed") is not None

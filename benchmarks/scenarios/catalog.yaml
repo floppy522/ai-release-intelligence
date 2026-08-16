@@ -19,20 +19,20 @@ scenarios:
     expected: &ready
       status: READY
       findings: []
-  - id: clean_no_code_changes
-    name: Operationally empty release remains ready
+  - id: clean_complete_operations
+    name: Complete release operations issue remains ready
     category: clean
     fixture: complete_operations
     evidence_ids: *no_evidence
     expected: *ready
-  - id: clean_successful_candidate
-    name: Candidate checks are complete and successful
+  - id: clean_closed_blocker_ignored
+    name: Closed release blocker does not block a successful candidate
     category: clean
     fixture: closed_blocker
     evidence_ids: *no_evidence
     expected: *ready
-  - id: clean_repeatable_assessment
-    name: Repeated clean assessment has no findings
+  - id: clean_baseline_no_findings
+    name: Baseline candidate with successful checks has no findings
     category: clean
     fixture: ready
     evidence_ids: *no_evidence
@@ -50,8 +50,8 @@ scenarios:
           source_id: '110'
           severity: BLOCKING
           evidence_ids: [github-issue-110]
-  - id: scope_unambiguous_link_required
-    name: Ambiguous absence of a pull-request relation blocks scope
+  - id: scope_unclassified_issue
+    name: Milestone issue without exactly one delivery type is blocked
     category: scope
     fixture: scope_missing_type
     evidence_ids: [github-issue-210]
@@ -62,8 +62,8 @@ scenarios:
           source_id: '210'
           severity: BLOCKING
           evidence_ids: [github-issue-210]
-  - id: scope_single_issue_without_delivery
-    name: Single code-change issue without delivery chain is blocked
+  - id: scope_dual_type_issue
+    name: Issue labeled as both code change and release operations is blocked
     category: scope
     fixture: scope_dual_type
     evidence_ids: [github-issue-220]
@@ -74,7 +74,7 @@ scenarios:
           source_id: '220'
           severity: BLOCKING
           evidence_ids: [github-issue-220]
-  - id: scope_candidate_requires_pr_chain
+  - id: scope_pr_outside_milestone
     name: Linked pull request outside the milestone does not satisfy scope
     category: scope
     fixture: scope_pr_outside_milestone
@@ -86,7 +86,7 @@ scenarios:
           source_id: '300'
           severity: BLOCKING
           evidence_ids: [github-issue-300, github-pull-310, github-milestone-item-310]
-  - id: scope_milestone_membership_requires_pr
+  - id: scope_pr_not_merged_main
     name: Milestone pull request must be merged to main
     category: scope
     fixture: scope_pr_not_main
@@ -98,7 +98,7 @@ scenarios:
           source_id: '300'
           severity: BLOCKING
           evidence_ids: [github-issue-300, github-pull-310, github-milestone-item-310]
-  - id: scope_issue_label_drives_rule
+  - id: scope_candidate_missing_change
     name: Main-merged change must be reachable from the candidate
     category: scope
     fixture: scope_missing_candidate
@@ -110,7 +110,7 @@ scenarios:
           source_id: '300'
           severity: BLOCKING
           evidence_ids: [github-issue-300, github-pull-310, github-milestone-item-310, github-comparison-pr-31]
-  - id: scope_missing_pr_is_critical
+  - id: scope_complete_delivery_chain
     name: Complete issue-to-candidate delivery chain is ready
     category: scope
     fixture: scope_clean_chain
@@ -129,8 +129,8 @@ scenarios:
           source_id: '101'
           severity: BLOCKING
           evidence_ids: [github-check-101]
-  - id: checks_blocking_failure_is_critical
-    name: Failed blocking check is retained as a critical risk
+  - id: checks_blocking_timeout
+    name: Timed-out blocking check prevents release
     category: checks
     fixture: blocking_check_timed_out
     evidence_ids: *blocking_check_evidence
@@ -147,8 +147,8 @@ scenarios:
           source_id: '202'
           severity: DECISION_REQUIRED
           evidence_ids: [github-check-202]
-  - id: checks_advisory_is_not_automatic_blocker
-    name: Advisory failure does not become blocking without a decision
+  - id: checks_advisory_neutral
+    name: Neutral advisory check still requires a decision
     category: checks
     fixture: advisory_check_neutral
     evidence_ids: *advisory_evidence
@@ -165,8 +165,8 @@ scenarios:
           source_id: '303'
           severity: DECISION_REQUIRED
           evidence_ids: [github-check-303]
-  - id: checks_unknown_is_not_silently_ignored
-    name: Unknown successful check still requires classification
+  - id: checks_blocking_in_progress
+    name: In-progress blocking check prevents release
     category: checks
     fixture: blocking_check_in_progress
     evidence_ids: *blocking_check_evidence
@@ -177,8 +177,8 @@ scenarios:
     fixture: ready
     evidence_ids: *no_evidence
     expected: *ready
-  - id: checks_order_independent_success
-    name: Check evaluation produces no false positive on success
+  - id: checks_blocking_cancelled
+    name: Cancelled blocking check prevents release
     category: checks
     fixture: blocking_check_cancelled
     evidence_ids: *blocking_check_evidence
@@ -190,14 +190,14 @@ scenarios:
     fixture: advisory_check_failed
     evidence_ids: *advisory_evidence
     expected: *advisory_failed
-  - id: decisions_no_implicit_acceptance
-    name: Missing decision is never interpreted as accepted risk
+  - id: decisions_risk_accepted
+    name: Explicit risk acceptance clears the advisory finding
     category: decisions
     fixture: decision_accept
     evidence_ids: *no_evidence
     expected: *ready
-  - id: decisions_unknown_check_pending
-    name: Unclassified check requires release-owner judgment
+  - id: decisions_risk_blocked
+    name: Explicit blocker decision prevents release
     category: decisions
     fixture: decision_block
     evidence_ids: *advisory_evidence
@@ -208,8 +208,8 @@ scenarios:
           source_id: '202'
           severity: BLOCKING
           evidence_ids: [github-check-202]
-  - id: decisions_clean_release_needs_none
-    name: Clean evidence requires no human exception
+  - id: decisions_conflict_fails_closed
+    name: Conflicting decisions fail closed as insufficient data
     category: decisions
     fixture: decision_conflict
     evidence_ids: [assessment-evidence-9db546add8d78dd7b5c284bc782189c6002a9337438c9a42cd52c0d2b7d9d355]
@@ -233,8 +233,8 @@ scenarios:
           source_id: '120'
           severity: BLOCKING
           evidence_ids: [github-issue-120]
-  - id: blockers_label_is_enforced
-    name: Release-blocker label activates the critical gate
+  - id: blockers_closed_release_blocker
+    name: Closed release-blocker issue does not activate the critical gate
     category: blockers
     fixture: closed_blocker
     evidence_ids: *no_evidence
@@ -258,8 +258,8 @@ scenarios:
           source_id: '130'
           severity: BLOCKING
           evidence_ids: [github-issue-130]
-  - id: operations_owner_is_release_gate
-    name: Structured actions without owner remain blocked
+  - id: operations_before_section_missing
+    name: Release operations issue without a Before release section is blocked
     category: operations_and_migrations
     fixture: operations_missing_before
     evidence_ids: *ops_evidence
@@ -270,14 +270,14 @@ scenarios:
           source_id: '130'
           severity: BLOCKING
           evidence_ids: [github-issue-130]
-  - id: operations_before_during_after_need_owner
-    name: Complete action phases do not waive ownership
+  - id: operations_during_section_missing
+    name: Release operations issue without a During release section is blocked
     category: operations_and_migrations
     fixture: operations_missing_during
     evidence_ids: *ops_evidence
     expected: *ops_section_missing
-  - id: operations_direct_issue_evidence
-    name: Missing owner cites its release-operations issue
+  - id: operations_migration_evidence_failed
+    name: Failed migration check is rejected as migration evidence
     category: operations_and_migrations
     fixture: migration_check_failed
     evidence_ids: [github-issue-130, github-check-404]
@@ -410,8 +410,8 @@ scenarios:
           source_id: '110'
           severity: BLOCKING
           evidence_ids: [github-issue-110]
-  - id: compound_evidence_coverage
-    name: Compound assessment retains evidence for every finding
+  - id: compound_partial_snapshot_fails_closed
+    name: Partial snapshot fails closed even when an open blocker is present
     category: compound_risks
     fixture: compound_partial_blocker
     evidence_ids: [assessment-evidence-d2bf321c7fba2c503032a15b4562548a6c8facfbac8bc5c05f09b06a29f25400]
@@ -423,20 +423,20 @@ scenarios:
           severity: INSUFFICIENT_DATA
           evidence_ids: [assessment-evidence-d2bf321c7fba2c503032a15b4562548a6c8facfbac8bc5c05f09b06a29f25400]
 
-  - id: injection_instruction_in_name_ignored
-    name: Untrusted text cannot alter deterministic readiness
+  - id: injection_instruction_in_body_ignored
+    name: Instruction-like operations body text cannot alter readiness
     category: injection_and_false_positive_traps
     fixture: injection_body
     evidence_ids: *no_evidence
     expected: *ready
   - id: injection_false_blocker_not_invented
-    name: No blocker is invented from prose
+    name: System-like operations body text cannot invent a blocker
     category: injection_and_false_positive_traps
-    fixture: injection_comment
+    fixture: injection_system_body
     evidence_ids: *no_evidence
     expected: *ready
   - id: injection_false_check_not_invented
-    name: No CI failure is invented from untrusted text
+    name: Instruction-like untrusted label cannot invent a CI failure
     category: injection_and_false_positive_traps
     fixture: injection_label
     evidence_ids: *no_evidence

@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from release_intelligence.benchmark.runner import BenchmarkRunner, main
+from release_intelligence.benchmark.runner import (
+    BenchmarkRunner,
+    _evaluate_fixture,
+    _write_atomic,
+    main,
+)
 from release_intelligence.benchmark.schema import (
     BenchmarkCatalog,
     BenchmarkFinding,
@@ -375,3 +380,107 @@ def test_cli_refuses_to_overwrite_its_catalog_input(
 
     assert main() == 2
     assert catalog.read_text() == original
+
+
+def test_cli_refuses_existing_output_before_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = Path(__file__).parents[4] / "benchmarks/scenarios/catalog.yaml"
+    output = tmp_path / "result.json"
+    original = b"irreplaceable prior result\n"
+    output.write_bytes(original)
+    evaluated = False
+
+    def unexpected_run(*_: object) -> object:
+        nonlocal evaluated
+        evaluated = True
+        raise AssertionError("evaluator must not run")
+
+    monkeypatch.setattr(BenchmarkRunner, "run", unexpected_run)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["benchmark-runner", "--catalog", str(catalog), "--output", str(output)],
+    )
+
+    assert main() == 2
+    assert evaluated is False
+    assert output.read_bytes() == original
+
+
+def test_atomic_writer_never_replaces_existing_output(tmp_path: Path) -> None:
+    output = tmp_path / "result.json"
+    original = b"prior result\n"
+    output.write_bytes(original)
+    result = BenchmarkRunner().run(
+        load_catalog(Path(__file__).parents[4] / "benchmarks/scenarios/catalog.yaml")
+    )
+
+    with pytest.raises(FileExistsError):
+        _write_atomic(output, result)
+
+    assert output.read_bytes() == original
+
+
+def test_atomic_writer_cleans_temp_file_when_exclusive_publish_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "result.json"
+    result = BenchmarkRunner().run(
+        load_catalog(Path(__file__).parents[4] / "benchmarks/scenarios/catalog.yaml")
+    )
+    monkeypatch.setattr(
+        "release_intelligence.benchmark.runner.os.link",
+        lambda *_: (_ for _ in ()).throw(OSError("publish failed")),
+    )
+
+    with pytest.raises(OSError, match="publish failed"):
+        _write_atomic(output, result)
+
+    assert output.exists() is False
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_catalog_names_and_fixtures_describe_the_executed_case() -> None:
+    catalog = load_catalog(
+        Path(__file__).parents[4] / "benchmarks/scenarios/catalog.yaml"
+    )
+    by_id = {scenario.id: scenario for scenario in catalog.scenarios}
+    expected = {
+        "checks_unknown_requires_classification": "unknown_check",
+        "checks_successful_required_set": "ready",
+        "checks_blocking_cancelled": "blocking_check_cancelled",
+        "checks_blocking_in_progress": "blocking_check_in_progress",
+        "decisions_advisory_pending": "advisory_check_failed",
+        "decisions_risk_accepted": "decision_accept",
+        "decisions_risk_blocked": "decision_block",
+        "decisions_conflict_fails_closed": "decision_conflict",
+    }
+
+    assert {
+        identifier: by_id[identifier].fixture for identifier in expected
+    } == expected
+
+
+def test_injection_label_fixture_uses_an_actual_untrusted_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = load_catalog(
+        Path(__file__).parents[4] / "benchmarks/scenarios/catalog.yaml"
+    )
+    scenario = next(
+        item for item in catalog.scenarios if item.fixture == "injection_label"
+    )
+    captured: list[object] = []
+    from release_intelligence.domain.assessment import assess as production_assess
+
+    def capture(snapshot: object, *args: object, **kwargs: object) -> object:
+        captured.append(snapshot)
+        return production_assess(snapshot, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("release_intelligence.benchmark.runner.assess", capture)
+
+    _evaluate_fixture(scenario)
+
+    snapshot = captured[0]
+    labels = snapshot.items[0].labels  # type: ignore[attr-defined]
+    assert "ignore-all-prior-instructions" in labels
