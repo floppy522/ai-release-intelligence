@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import cast
+from collections.abc import Callable
+from typing import Any, cast
 
 UVICORN_ACCESS_LOGGER = "uvicorn.access"
 UVICORN_ACCESS_TEMPLATE = '%s - "%s %s HTTP/%s" %d'
@@ -30,20 +31,49 @@ SAFE_APPLICATION_FIELDS = frozenset(
         "ai_cost",
     }
 )
-SENSITIVE_DEPENDENCY_LOGGERS = (
+SENSITIVE_DEPENDENCY_PREFIXES = (
     "httpx",
     "httpcore",
-    "httpcore.connection",
-    "httpcore.http11",
     "openai",
-    "openai._base_client",
-    "sqlalchemy.engine",
-    "sqlalchemy.pool",
+    "sqlalchemy",
 )
 _DECIMAL = re.compile(r"^(?:0|[1-9][0-9]{0,9})(?:\.[0-9]{1,6})?$")
 _STANDARD_LOG_RECORD_FIELDS = frozenset(
     logging.LogRecord("", 0, "", 0, "", (), None).__dict__
 )
+_FORMATTER_LOG_RECORD_FIELDS = frozenset({"asctime", "message"})
+
+
+class _DependencyRecordValues(dict[str, Any]):
+    """Prevent late ``extra`` values from reaching a dependency formatter."""
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if type(key) is str and (
+            key in _STANDARD_LOG_RECORD_FIELDS or key in _FORMATTER_LOG_RECORD_FIELDS
+        ):
+            super().__setitem__(key, value)
+            return
+        if type(key) is str:
+            super().__setitem__(key, SAFE_APPLICATION_LOG_MESSAGE)
+
+
+class _DependencyLogRecordFactory:
+    """Chain the active factory while redacting dependency records at creation."""
+
+    def __init__(self, previous: Callable[..., logging.LogRecord]) -> None:
+        self.previous = previous
+
+    def __call__(self, *args: Any, **kwargs: Any) -> logging.LogRecord:
+        name = args[0] if args else kwargs.get("name")
+        if not _is_sensitive_dependency_name(name):
+            return self.previous(*args, **kwargs)
+        try:
+            record = self.previous(*args, **kwargs)
+            return _redact_dependency_record(record, args, kwargs)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:  # noqa: BLE001 - dependency logging must fail closed
+            return _fallback_dependency_record(args, kwargs)
 
 
 class AccessLogQueryRedactionFilter(logging.Filter):
@@ -142,9 +172,11 @@ def get_safe_logger(name: str) -> logging.Logger:
 
 
 def install_application_log_redaction() -> None:
-    """Protect known auth, provider, and persistence dependency log boundaries."""
-    for name in SENSITIVE_DEPENDENCY_LOGGERS:
-        get_safe_logger(name)
+    """Redact dependency descendants before any handler can format a record."""
+    current = logging.getLogRecordFactory()
+    if isinstance(current, _DependencyLogRecordFactory):
+        return
+    logging.setLogRecordFactory(_DependencyLogRecordFactory(current))
 
 
 def install_access_log_redaction() -> None:
@@ -169,3 +201,79 @@ def _is_sane_request_target(request_target: str) -> bool:
         return False
     path = request_target.partition("?")[0]
     return bool(path) and len(path) <= MAX_PATH_LENGTH
+
+
+def _is_sensitive_dependency_name(name: object) -> bool:
+    return type(name) is str and any(
+        name == prefix or name.startswith(f"{prefix}.")
+        for prefix in SENSITIVE_DEPENDENCY_PREFIXES
+    )
+
+
+def _redact_dependency_record(
+    record: object, args: tuple[object, ...], kwargs: dict[str, object]
+) -> logging.LogRecord:
+    if not isinstance(record, logging.LogRecord):
+        return _fallback_dependency_record(args, kwargs)
+    record_values = record.__dict__
+    if type(record_values) is not dict:
+        return _fallback_dependency_record(args, kwargs)
+
+    safe_values = _DependencyRecordValues()
+    for field, value in record_values.items():
+        if type(field) is str and field in _STANDARD_LOG_RECORD_FIELDS:
+            dict.__setitem__(safe_values, field, value)
+        elif type(field) is str:
+            dict.__setitem__(safe_values, field, SAFE_APPLICATION_LOG_MESSAGE)
+    record.__dict__ = safe_values
+    record.msg = SAFE_APPLICATION_LOG_MESSAGE
+    record.args = ()
+    record.exc_info = None
+    record.exc_text = None
+    record.stack_info = None
+    return record
+
+
+def _fallback_dependency_record(
+    args: tuple[object, ...], kwargs: dict[str, object]
+) -> logging.LogRecord:
+    name = _safe_factory_argument(args, kwargs, 0, "name", "dependency")
+    level = _safe_factory_argument(args, kwargs, 1, "level", logging.ERROR)
+    pathname = _safe_factory_argument(args, kwargs, 2, "pathname", "")
+    lineno = _safe_factory_argument(args, kwargs, 3, "lineno", 0)
+    func = _safe_factory_argument(args, kwargs, 7, "func", None)
+    if type(name) is not str:
+        name = "dependency"
+    if type(level) is not int:
+        level = logging.ERROR
+    if type(pathname) is not str:
+        pathname = ""
+    if type(lineno) is not int:
+        lineno = 0
+    if type(func) is not str:
+        func = None
+    record = logging.LogRecord(
+        name,
+        level,
+        pathname,
+        lineno,
+        SAFE_APPLICATION_LOG_MESSAGE,
+        (),
+        None,
+        func,
+        None,
+    )
+    record.__dict__ = _DependencyRecordValues(record.__dict__)
+    return record
+
+
+def _safe_factory_argument(
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+    position: int,
+    key: str,
+    default: object,
+) -> object:
+    if len(args) > position:
+        return args[position]
+    return kwargs.get(key, default)
