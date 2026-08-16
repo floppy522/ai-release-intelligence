@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -155,9 +156,7 @@ class MemoryAnalysisRepository:
 
 
 class FakePolicyStore:
-    def __init__(
-        self, record: PolicyRecord | None, *, failure: bool = False
-    ) -> None:
+    def __init__(self, record: PolicyRecord | None, *, failure: bool = False) -> None:
         self.record = record
         self.failure = failure
         self.requested_repository_ids: list[str] = []
@@ -302,6 +301,62 @@ async def test_analysis_uses_current_configured_policy_for_decision_eligible_run
     assert [finding.rule_id for finding in stored.findings] == [
         "checks.advisory_requires_decision"
     ]
+
+
+async def test_analysis_loads_policy_selected_previous_release_before_snapshot() -> (
+    None
+):
+    previous_policy = ReleasePolicy(
+        main_branch="main",
+        candidate_branch="release/2026-08-10",
+        milestone_number=7,
+        code_change_label="code-change",
+        release_ops_label="release-ops",
+        blocker_label="release-blocker",
+        check_categories={},
+        previous_milestone_number=6,
+        previous_release_branch="release/2026-08-03",
+    )
+    policy_store = FakePolicyStore(
+        PolicyRecord(
+            repository_id=REPOSITORY_ID,
+            version=5,
+            policy=previous_policy,
+            created_at=NOW,
+        )
+    )
+    loader = FakeLoader(
+        replace(
+            snapshot(candidate_sha="a" * 40),
+            previous_milestone_number=6,
+            previous_release_branch="release/2026-08-03",
+        )
+    )
+    repository = MemoryAnalysisRepository()
+
+    run_id = await service(loader, repository, policy_store).run(
+        AnalysisRequest(
+            repository_id=REPOSITORY_ID,
+            repository=RepoRef(owner="example", name="release-intelligence"),
+            installation_id=123,
+            milestone_number=7,
+            candidate_ref="release/2026-08-10",
+        ),
+        actor="github:7",
+    )
+
+    assert loader.requests == [
+        AnalysisRequest(
+            repository_id=REPOSITORY_ID,
+            repository=RepoRef(owner="example", name="release-intelligence"),
+            installation_id=123,
+            milestone_number=7,
+            candidate_ref="release/2026-08-10",
+            previous_milestone_number=6,
+            previous_release_branch="release/2026-08-03",
+        )
+    ]
+    assert repository.runs[run_id].assessment.status.value == "READY"
 
 
 async def test_partial_and_rate_limited_snapshots_are_persisted_insufficient(

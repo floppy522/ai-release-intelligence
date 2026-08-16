@@ -2,29 +2,24 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID
 
 from release_intelligence.adapters.fixtures.github_source import load_demo_release
+from release_intelligence.domain.assessment import assess as _assess
 from release_intelligence.domain.assessment import assess_release
 from release_intelligence.domain.models import (
     EvidenceRef,
     PullRequestComparison,
     ReadinessAssessment,
-    ReadinessFinding,
     ReleaseLink,
     ReleaseSnapshot,
-    ReleaseStatus,
     SnapshotVersion,
     SourceError,
 )
 from release_intelligence.domain.policy import ReleasePolicy
-from release_intelligence.domain.rules.checks import (
-    CheckDecision,
-    CheckEvidenceError,
-    evaluate_checks,
-)
+from release_intelligence.domain.rules.checks import CheckDecision
 from release_intelligence.ports.github import (
     GitHubCheck,
     GitHubError,
@@ -45,7 +40,6 @@ from release_intelligence.ports.repositories import (
     StoredAnalysisRun,
 )
 
-MAX_SNAPSHOT_AGE = timedelta(minutes=10)
 MAX_MILESTONE_ITEMS = 100
 MAX_RELATED_PULL_REQUESTS = 200
 MAX_CANDIDATE_CHECKS = 100
@@ -58,6 +52,8 @@ class AnalysisRequest:
     installation_id: int
     milestone_number: int
     candidate_ref: str
+    previous_milestone_number: int | None = None
+    previous_release_branch: str | None = None
 
 
 class MissingMilestone(Exception):
@@ -92,13 +88,28 @@ class AnalysisService:
     async def run(self, request: AnalysisRequest, actor: str) -> UUID:
         if not actor:
             raise ValueError("actor is required")
+        policy_record = (
+            await self._policy_repository.get_latest(request.repository_id)
+            if self._policy_repository is not None
+            else None
+        )
+        policy = policy_record.policy if policy_record is not None else None
+        configured_request = replace(
+            request,
+            previous_milestone_number=(
+                policy.previous_milestone_number if policy is not None else None
+            ),
+            previous_release_branch=(
+                policy.previous_release_branch if policy is not None else None
+            ),
+        )
         bootstrap_started_at = self._now()
         try:
-            loader = await self._loader_factory(request)
-            snapshot = await loader.load(request)
+            loader = await self._loader_factory(configured_request)
+            snapshot = await loader.load(configured_request)
         except GitHubRateLimited as error:
             snapshot = _unavailable_snapshot(
-                request,
+                configured_request,
                 bootstrap_started_at,
                 self._now(),
                 SourceError(
@@ -109,7 +120,7 @@ class AnalysisService:
             )
         except GitHubPartialData:
             snapshot = _unavailable_snapshot(
-                request,
+                configured_request,
                 bootstrap_started_at,
                 self._now(),
                 SourceError(
@@ -117,13 +128,7 @@ class AnalysisService:
                     message="GitHub returned incomplete release evidence",
                 ),
             )
-        policy_record = (
-            await self._policy_repository.get_latest(request.repository_id)
-            if self._policy_repository is not None
-            else None
-        )
         now = self._now()
-        policy = policy_record.policy if policy_record is not None else None
         policy_version = (
             f"configuration:{policy_record.version}"
             if policy_record is not None
@@ -154,6 +159,8 @@ class AnalysisService:
 @dataclass(frozen=True, slots=True)
 class _EvidenceWindow:
     milestone: GitHubMilestone
+    previous_milestone: GitHubMilestone | None
+    previous_release_branch: str | None
     items: tuple[GitHubItem, ...]
     candidate_sha: str
     links: tuple[ReleaseLink, ...]
@@ -216,28 +223,48 @@ class GitHubReleaseLoader:
                 ),
             ),
             fetched_at=self._now(),
+            previous_milestone_number=None,
+            previous_release_branch=None,
         )
 
     async def _collect_window(self, request: AnalysisRequest) -> _EvidenceWindow:
         milestone = await self._get_milestone(request)
+        current_items = await self._source.list_milestone_items(
+            request.repository, request.milestone_number
+        )
+        previous_milestone: GitHubMilestone | None = None
+        previous_items: tuple[GitHubItem, ...] = ()
+        previous_number = request.previous_milestone_number
+        previous_branch = request.previous_release_branch
+        if (previous_number is None) != (previous_branch is None):
+            raise GitHubPartialData()
+        if previous_number is not None:
+            previous_milestone = await self._get_previous_milestone(
+                request, previous_number
+            )
+            previous_items = await self._source.list_milestone_items(
+                request.repository, previous_number
+            )
+        if len(current_items) + len(previous_items) > MAX_MILESTONE_ITEMS:
+            raise GitHubPartialData()
         items = tuple(
             sorted(
-                await self._source.list_milestone_items(
-                    request.repository, request.milestone_number
-                ),
+                (*current_items, *previous_items),
                 key=lambda item: (item.kind.value, item.source_id, item.number),
             )
         )
-        if len(items) > MAX_MILESTONE_ITEMS:
-            raise GitHubPartialData()
         candidate_sha = await self._resolve_candidate(request)
 
         links_by_key: dict[tuple[int, int, str], ReleaseLink] = {}
         event_count = 0
-        pull_numbers = {
+        current_item_numbers = {item.number for item in current_items}
+        current_pull_numbers = {
             item.number
-            for item in items
+            for item in current_items
             if item.kind is GitHubItemKind.PULL_REQUEST
+        }
+        pull_numbers = {
+            item.number for item in items if item.kind is GitHubItemKind.PULL_REQUEST
         }
         for item in items:
             if item.kind is not GitHubItemKind.ISSUE:
@@ -268,13 +295,15 @@ class GitHubReleaseLoader:
                 ):
                     links_by_key[link_key] = candidate
                 pull_numbers.add(event.pull_request_number)
+                if item.number in current_item_numbers:
+                    current_pull_numbers.add(event.pull_request_number)
                 if len(pull_numbers) > MAX_RELATED_PULL_REQUESTS:
                     raise GitHubPartialData()
         pulls = tuple(
             sorted(
                 [
-                await self._source.get_pull_request(request.repository, number)
-                for number in sorted(pull_numbers)
+                    await self._source.get_pull_request(request.repository, number)
+                    for number in sorted(pull_numbers)
                 ],
                 key=lambda pull: (pull.source_id, pull.number),
             )
@@ -294,14 +323,15 @@ class GitHubReleaseLoader:
         comparisons = tuple(
             sorted(
                 [
-                PullRequestComparison(
-                    pull_request_number=pull.number,
-                    comparison=await self._source.compare_commits(
-                        request.repository, pull.merge_commit_sha, candidate_sha
-                    ),
-                )
-                for pull in pulls
-                if pull.merge_commit_sha is not None
+                    PullRequestComparison(
+                        pull_request_number=pull.number,
+                        comparison=await self._source.compare_commits(
+                            request.repository, pull.merge_commit_sha, candidate_sha
+                        ),
+                    )
+                    for pull in pulls
+                    if pull.number in current_pull_numbers
+                    and pull.merge_commit_sha is not None
                 ],
                 key=lambda comparison: comparison.pull_request_number,
             )
@@ -314,6 +344,8 @@ class GitHubReleaseLoader:
 
         return _EvidenceWindow(
             milestone=milestone,
+            previous_milestone=previous_milestone,
+            previous_release_branch=previous_branch,
             items=items,
             candidate_sha=candidate_sha,
             links=tuple(
@@ -339,7 +371,13 @@ class GitHubReleaseLoader:
         window: _EvidenceWindow,
     ) -> ReleaseSnapshot:
         issue_item = next(
-            (item for item in window.items if item.kind is GitHubItemKind.ISSUE), None
+            (
+                item
+                for item in window.items
+                if item.kind is GitHubItemKind.ISSUE
+                and item.milestone_number == request.milestone_number
+            ),
+            None,
         )
         linked = tuple(
             str(link.pull_request_number)
@@ -369,6 +407,12 @@ class GitHubReleaseLoader:
             pull_requests=window.pull_requests,
             checks=window.checks,
             comparisons=window.comparisons,
+            previous_milestone_number=(
+                window.previous_milestone.number
+                if window.previous_milestone is not None
+                else None
+            ),
+            previous_release_branch=window.previous_release_branch,
         )
         return snapshot
 
@@ -379,6 +423,16 @@ class GitHubReleaseLoader:
             )
         except GitHubNotFound:
             raise MissingMilestone() from None
+
+    async def _get_previous_milestone(
+        self, request: AnalysisRequest, milestone_number: int
+    ) -> GitHubMilestone:
+        try:
+            return await self._source.get_milestone(
+                request.repository, milestone_number
+            )
+        except GitHubNotFound:
+            raise GitHubPartialData() from None
 
     async def _resolve_candidate(self, request: AnalysisRequest) -> str:
         try:
@@ -445,9 +499,7 @@ def _unavailable_snapshot(
         ),
         snapshot_version=SnapshotVersion.GITHUB_V1,
         repository_id=request.repository_id,
-        repository_full_name=(
-            f"{request.repository.owner}/{request.repository.name}"
-        ),
+        repository_full_name=(f"{request.repository.owner}/{request.repository.name}"),
         fetch_started_at=fetch_started_at,
         fetched_at=fetched_at,
         complete=False,
@@ -468,94 +520,6 @@ def assess(
     *,
     now: datetime,
 ) -> ReadinessAssessment:
-    if snapshot.snapshot_version is SnapshotVersion.LEGACY:
-        trusted_legacy_fixture = (
-            snapshot.repository_id == "fixture:demo"
-            and snapshot.repository_full_name == "example/release-demo"
-            and snapshot.complete
-            and not snapshot.source_errors
-            and snapshot.fetch_started_at is None
-            and snapshot.fetched_at is None
-            and not snapshot.candidate_ref
-            and not snapshot.candidate_sha
-            and not snapshot.items
-            and not snapshot.links
-            and not snapshot.pull_requests
-            and not snapshot.checks
-            and not snapshot.comparisons
-        )
-        if trusted_legacy_fixture:
-            return assess_release(snapshot)
-        return ReadinessAssessment(
-            status=ReleaseStatus.INSUFFICIENT_DATA, findings=()
-        )
-    if snapshot.snapshot_version is not SnapshotVersion.GITHUB_V1:
-        return ReadinessAssessment(
-            status=ReleaseStatus.INSUFFICIENT_DATA, findings=()
-        )
-    if now.tzinfo is None:
-        return ReadinessAssessment(
-            status=ReleaseStatus.INSUFFICIENT_DATA, findings=()
-        )
-    if (
-        not snapshot.complete
-        or snapshot.source_errors
-        or snapshot.fetch_started_at is None
-        or snapshot.fetched_at is None
-        or snapshot.fetch_started_at.tzinfo is None
-        or snapshot.fetched_at.tzinfo is None
-        or not snapshot.candidate_ref
-        or not snapshot.candidate_sha
-        or snapshot.milestone_number <= 0
-        or not snapshot.repository_id
-        or not snapshot.repository_full_name
-    ):
-        return ReadinessAssessment(
-            status=ReleaseStatus.INSUFFICIENT_DATA, findings=()
-        )
-    started_at = snapshot.fetch_started_at.astimezone(UTC)
-    fetched_at = snapshot.fetched_at.astimezone(UTC)
-    effective_now = now.astimezone(UTC)
-    if (
-        started_at > fetched_at
-        or fetched_at > effective_now
-        or effective_now - fetched_at > MAX_SNAPSHOT_AGE
-    ):
-        return ReadinessAssessment(
-            status=ReleaseStatus.INSUFFICIENT_DATA, findings=()
-        )
-    base_assessment = assess_release(snapshot)
-    if policy is None:
-        return base_assessment
-    try:
-        check_findings = evaluate_checks(snapshot, policy, decisions=decisions)
-    except CheckEvidenceError as error:
-        findings = _ordered_findings((*base_assessment.findings, *error.findings))
-        return ReadinessAssessment(
-            status=ReleaseStatus.INSUFFICIENT_DATA,
-            findings=findings,
-        )
-    findings = _ordered_findings((*base_assessment.findings, *check_findings))
-    if any(finding.blocks_release for finding in findings):
-        status = ReleaseStatus.NOT_READY
-    elif any(finding.requires_decision for finding in findings):
-        status = ReleaseStatus.NEEDS_DECISION
-    else:
-        status = ReleaseStatus.READY
-    return ReadinessAssessment(status=status, findings=findings)
+    """Compatibility boundary for existing application and route callers."""
 
-
-def _ordered_findings(
-    findings: Iterable[ReadinessFinding],
-) -> tuple[ReadinessFinding, ...]:
-    return tuple(
-        sorted(
-            findings,
-            key=lambda finding: (
-                finding.rule_id,
-                finding.summary,
-                finding.required_action,
-                tuple(evidence.fingerprint for evidence in finding.evidence),
-            ),
-        )
-    )
+    return _assess(snapshot, policy, decisions, now=now)

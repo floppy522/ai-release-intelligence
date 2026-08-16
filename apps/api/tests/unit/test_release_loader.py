@@ -45,6 +45,11 @@ REQUEST = AnalysisRequest(
     milestone_number=7,
     candidate_ref="release/2026-08-10",
 )
+PREVIOUS_REQUEST = replace(
+    REQUEST,
+    previous_milestone_number=6,
+    previous_release_branch="release/2026-08-03",
+)
 
 
 def milestone(*, updated_at: datetime = NOW) -> GitHubMilestone:
@@ -225,6 +230,46 @@ async def test_complete_loader_captures_normalized_evidence_window() -> None:
     assert AnalysisRepository._snapshot_from_payload(payload) == snapshot
 
 
+async def test_loader_collects_configured_previous_milestone_in_both_windows() -> None:
+    source = FakeSource()
+    previous = replace(
+        milestone(),
+        source_id="600",
+        number=6,
+        url="https://github.com/example/release-intelligence/milestone/6",
+    )
+    source.milestones = [milestone(), previous, milestone(), previous]
+    source.item_sets = [(issue(),), (), (issue(),), ()]
+
+    loaded = await GitHubReleaseLoader(source, clock=lambda: NOW).load(PREVIOUS_REQUEST)
+
+    assert loaded.complete is True
+    assert loaded.previous_milestone_number == 6
+    assert loaded.previous_release_branch == "release/2026-08-03"
+    assert source.calls["milestone"] == 4
+    assert source.calls["items"] == 4
+    assert source.calls["checks"] == 2
+
+
+async def test_partial_previous_release_collection_clears_context_markers() -> None:
+    class PartialPreviousSource(FakeSource):
+        async def list_milestone_items(
+            self, repo: RepoRef, number: int
+        ) -> tuple[GitHubItem, ...]:
+            if number == 6:
+                raise GitHubPartialData()
+            return await super().list_milestone_items(repo, number)
+
+    loaded = await GitHubReleaseLoader(PartialPreviousSource(), clock=lambda: NOW).load(
+        PREVIOUS_REQUEST
+    )
+
+    assert loaded.complete is False
+    assert loaded.source_errors[0].code == "github.partial_data"
+    assert loaded.previous_milestone_number is None
+    assert loaded.previous_release_branch is None
+
+
 async def test_partial_github_fetch_cannot_produce_ready() -> None:
     source = FakeSource()
     source.fail_at = "checks"
@@ -270,9 +315,7 @@ async def test_rate_limit_reset_is_preserved_as_source_metadata() -> None:
 async def test_loader_reconciles_one_changed_window_then_succeeds() -> None:
     source = FakeSource()
     source.refs = ["old-sha", "new-sha", "candidate-sha", "candidate-sha"]
-    source.check_sets = [
-        (replace(check(), head_sha=sha),) for sha in source.refs
-    ]
+    source.check_sets = [(replace(check(), head_sha=sha),) for sha in source.refs]
     source.comparison_sets = [
         replace(comparison(), head_sha=sha) for sha in source.refs
     ]
@@ -287,9 +330,7 @@ async def test_loader_reconciles_one_changed_window_then_succeeds() -> None:
 async def test_loader_fails_closed_after_second_inconsistent_window() -> None:
     source = FakeSource()
     source.refs = ["a", "b", "c", "d"]
-    source.check_sets = [
-        (replace(check(), head_sha=sha),) for sha in source.refs
-    ]
+    source.check_sets = [(replace(check(), head_sha=sha),) for sha in source.refs]
     source.comparison_sets = [
         replace(comparison(), head_sha=sha) for sha in source.refs
     ]
@@ -419,8 +460,7 @@ async def test_loader_fails_closed_at_timeline_fanout_cap() -> None:
             source_id=str(900 + number),
             pull_request_number=1000 + number,
             pull_request_url=(
-                "https://github.com/example/release-intelligence/pull/"
-                f"{1000 + number}"
+                f"https://github.com/example/release-intelligence/pull/{1000 + number}"
             ),
         )
         for number in range(201)
@@ -460,9 +500,7 @@ async def test_snapshot_older_than_ten_minutes_is_insufficient() -> None:
         ),
         lambda value: replace(
             value,
-            source_errors=(
-                SourceError(code="github.partial_data", message="partial"),
-            ),
+            source_errors=(SourceError(code="github.partial_data", message="partial"),),
         ),
         lambda value: replace(value, fetched_at=NOW.replace(tzinfo=None)),
         lambda value: replace(value, candidate_ref=""),

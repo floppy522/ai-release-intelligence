@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 
 import { recordDecision } from "../../api/client";
 import type { DecisionFinding, DecisionKind } from "../../api/types";
@@ -18,6 +18,7 @@ export function DecisionForm({
   csrfToken = "",
   onRecorded,
 }: DecisionFormProps) {
+  const errorId = useId();
   const [reason, setReason] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [selected, setSelected] = useState<DecisionKind | null>(null);
@@ -74,7 +75,9 @@ export function DecisionForm({
 
   return (
     <form onSubmit={(event) => event.preventDefault()}>
-      <h2>Human decision required</h2>
+      <p className="decision-form__title">
+        <strong>Human decision required</strong>
+      </p>
       <p>{finding.summary}</p>
       <dl>
         <div>
@@ -93,7 +96,7 @@ export function DecisionForm({
           onChange={(event) => setReason(event.target.value)}
           maxLength={4000}
           aria-invalid={validation?.startsWith("Explain") ?? false}
-          aria-describedby={validation ? "decision-error" : undefined}
+          aria-describedby={validation ? errorId : undefined}
         />
       </label>
       <label>
@@ -123,7 +126,7 @@ export function DecisionForm({
         </button>
       </div>
       {validation ? (
-        <p id="decision-error" role="alert">
+        <p id={errorId} role="alert">
           {validation}
         </p>
       ) : null}
