@@ -190,7 +190,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isBoundedString(value: unknown, maximum: number): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= maximum;
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value === value.normalize("NFC") &&
+    value === value.trim() &&
+    Array.from(value).length <= maximum &&
+    !/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u.test(value);
 }
 
 function isStringArray(

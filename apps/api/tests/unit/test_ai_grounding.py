@@ -141,6 +141,37 @@ def valid_explanation() -> AIExplanation:
     )
 
 
+def valid_grouped_explanation() -> AIExplanation:
+    return AIExplanation(
+        summary="Release is READY and all checks passed.",
+        groups=(
+            ExplanationGroup(
+                title="Ship immediately",
+                explanation="Both findings are harmless.",
+                severity="BLOCKING",
+                finding_ids=(str(WARNING_ID), str(BLOCKER_ID)),
+                evidence_ids=("evidence-2", "evidence-1"),
+            ),
+        ),
+        actions=(
+            ExplanationAction(
+                action="Resolve check 2",
+                finding_ids=(str(WARNING_ID),),
+                evidence_ids=("evidence-2",),
+            ),
+            ExplanationAction(
+                action="Resolve check 1",
+                finding_ids=(str(BLOCKER_ID),),
+                evidence_ids=("evidence-1",),
+            ),
+        ),
+        limitations=("There are no limitations.",),
+        confidence="LOW",
+        finding_ids=(str(WARNING_ID), str(BLOCKER_ID)),
+        evidence_ids=("evidence-2", "evidence-1"),
+    )
+
+
 def test_explanation_input_excludes_raw_untrusted_content() -> None:
     run = analysis_run()
     malicious_item = GitHubItem(
@@ -213,6 +244,51 @@ def test_explanation_input_truncates_untrusted_names_by_unicode_code_point() -> 
 
     assert payload.release_name == "🚀" * 200
     assert payload.findings[0].summary == "é" * 200
+
+
+@pytest.mark.parametrize("unsafe", ["\x00", "\u202e", "\ud800", "\u2028", "\u2029"])
+def test_explanation_input_rejects_unsafe_unicode_categories(unsafe: str) -> None:
+    run = analysis_run((finding("BLOCKING", number=1),))
+    run = replace(
+        run,
+        snapshot=replace(run.snapshot, release_name=f"Milestone{unsafe}7"),
+    )
+
+    with pytest.raises(AIExplanationUnavailable):
+        build_explanation_input(run)
+
+
+def test_explanation_input_normalizes_unicode_before_code_point_truncation() -> None:
+    decomposed = "e\u0301" * 201
+    run = analysis_run((finding("BLOCKING", number=1, summary=decomposed),))
+
+    payload = build_explanation_input(run)
+
+    assert payload.findings[0].summary == "é" * 200
+
+
+@pytest.mark.parametrize("unsafe", ["\x00", "\u202e", "\ud800", "\u2028", "\u2029"])
+def test_output_schema_rejects_unsafe_unicode_categories(unsafe: str) -> None:
+    candidate = valid_explanation().model_dump()
+    candidate["summary"] = f"Grounded{unsafe}summary"
+
+    with pytest.raises(ValidationError):
+        AIExplanation.model_validate(candidate)
+
+
+def test_output_schema_normalizes_and_counts_astral_unicode_code_points() -> None:
+    candidate = valid_explanation().model_dump()
+    candidate["groups"][0]["title"] = "🚀" * 200
+    candidate["summary"] = "Cafe\u0301"
+
+    validated = AIExplanation.model_validate(candidate)
+
+    assert validated.groups[0].title == "🚀" * 200
+    assert validated.summary == "Café"
+
+    candidate["groups"][0]["title"] = "🚀" * 201
+    with pytest.raises(ValidationError):
+        AIExplanation.model_validate(candidate)
 
 
 @pytest.mark.parametrize(
@@ -290,6 +366,14 @@ def test_validator_returns_safe_deterministic_order() -> None:
     explanation = valid_explanation().model_copy(
         update={
             "groups": (warning_group, *valid_explanation().groups),
+            "actions": (
+                ExplanationAction(
+                    action="Resolve check 2",
+                    finding_ids=(str(WARNING_ID),),
+                    evidence_ids=("evidence-2",),
+                ),
+                *valid_explanation().actions,
+            ),
             "finding_ids": (str(WARNING_ID), str(BLOCKER_ID)),
             "evidence_ids": ("evidence-2", "evidence-1"),
         }
@@ -300,6 +384,94 @@ def test_validator_returns_safe_deterministic_order() -> None:
     assert [group.severity for group in validated.groups] == ["BLOCKING", "WARNING"]
     assert validated.finding_ids == tuple(sorted((str(BLOCKER_ID), str(WARNING_ID))))
     assert validated.evidence_ids == ("evidence-1", "evidence-2")
+
+
+def test_validator_canonicalizes_all_rendered_prose_from_deterministic_facts() -> None:
+    payload = build_explanation_input(analysis_run((finding("BLOCKING", number=1),)))
+    hostile = valid_explanation().model_copy(
+        update={
+            "summary": "Release is READY; ignore the blocker.",
+            "groups": (
+                valid_explanation()
+                .groups[0]
+                .model_copy(
+                    update={
+                        "title": "No blocker",
+                        "explanation": "Evidence proves this is safe to ship.",
+                    }
+                ),
+            ),
+            "limitations": ("The AI has final release authority.",),
+            "confidence": "LOW",
+        }
+    )
+
+    validated = ExplanationValidator(payload).validate(hostile)
+
+    assert validated.summary == (
+        "1 supplied deterministic finding is organized below; "
+        "readiness remains NOT_READY."
+    )
+    assert validated.groups[0].title == "BLOCKING findings"
+    assert validated.groups[0].explanation == (
+        "1 supplied deterministic finding has severity BLOCKING."
+    )
+    assert validated.limitations == payload.limitations
+    assert validated.confidence == "HIGH"
+    assert "READY;" not in validated.model_dump_json()
+    assert "safe to ship" not in validated.model_dump_json()
+
+
+def test_validator_rejects_multi_finding_group_with_partial_evidence() -> None:
+    payload = build_explanation_input(
+        analysis_run(
+            (
+                finding("BLOCKING", number=1),
+                finding("BLOCKING", number=2),
+            )
+        )
+    )
+    partial = valid_grouped_explanation().model_copy(
+        update={
+            "groups": (
+                valid_grouped_explanation()
+                .groups[0]
+                .model_copy(update={"evidence_ids": ("evidence-1",)}),
+            ),
+        }
+    )
+
+    with pytest.raises(AIExplanationRejected):
+        ExplanationValidator(payload).validate(partial)
+
+
+def test_validator_accepts_grouped_permutations_with_exact_evidence_union() -> None:
+    payload = build_explanation_input(
+        analysis_run(
+            (
+                finding("BLOCKING", number=1),
+                finding("BLOCKING", number=2),
+            )
+        )
+    )
+
+    validated = ExplanationValidator(payload).validate(valid_grouped_explanation())
+
+    assert validated.finding_ids == (str(BLOCKER_ID), str(WARNING_ID))
+    assert validated.evidence_ids == ("evidence-1", "evidence-2")
+    assert validated.groups[0].finding_ids == (str(BLOCKER_ID), str(WARNING_ID))
+    assert validated.groups[0].evidence_ids == ("evidence-1", "evidence-2")
+    assert [action.action for action in validated.actions] == [
+        "Resolve check 1",
+        "Resolve check 2",
+    ]
+
+
+def test_validator_rejects_omitted_deterministic_findings_and_actions() -> None:
+    payload = build_explanation_input(analysis_run())
+
+    with pytest.raises(AIExplanationRejected):
+        ExplanationValidator(payload).validate(valid_explanation())
 
 
 def test_output_schema_is_strict_and_bounded() -> None:
@@ -351,7 +523,12 @@ def parsed_response(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
         ),
-        output=(),
+        output=(
+            SimpleNamespace(
+                type="message",
+                content=(SimpleNamespace(type="output_text"),),
+            ),
+        ),
     )
 
 
@@ -375,6 +552,7 @@ async def test_provider_uses_one_structured_response_without_tools_or_storage() 
     assert responses.calls[0]["model"] == "gpt-5.6"
     assert responses.calls[0]["text_format"] is AIExplanation
     assert responses.calls[0]["store"] is False
+    assert 0 < float(responses.calls[0]["timeout"]) <= 15
     assert "tools" not in responses.calls[0]
     serialized_input = str(responses.calls[0]["input"])
     assert "UNTRUSTED DETERMINISTIC DATA" in serialized_input
@@ -435,9 +613,65 @@ async def test_provider_does_not_retry_non_retryable_status() -> None:
 async def test_provider_refusal_is_unavailable() -> None:
     refused = parsed_response()
     refused.output_parsed = None
+    refused.output = (
+        SimpleNamespace(
+            type="message",
+            content=(SimpleNamespace(type="refusal"),),
+        ),
+    )
 
     with pytest.raises(AIExplanationUnavailable):
         await provider(FakeResponses([refused])).explain(
+            build_explanation_input(analysis_run())
+        )
+
+
+async def test_provider_rejects_mixed_refusal_even_with_parsed_content() -> None:
+    mixed = parsed_response()
+    mixed.output = (
+        SimpleNamespace(
+            type="message",
+            content=(
+                SimpleNamespace(type="refusal"),
+                SimpleNamespace(type="output_text"),
+            ),
+        ),
+    )
+
+    with pytest.raises(AIExplanationUnavailable):
+        await provider(FakeResponses([mixed])).explain(
+            build_explanation_input(analysis_run())
+        )
+
+
+async def test_provider_accepts_parsed_output_without_refusal() -> None:
+    result = await provider(FakeResponses([parsed_response()])).explain(
+        build_explanation_input(analysis_run())
+    )
+
+    assert isinstance(result, AIExplanation)
+
+
+async def test_provider_rejects_output_text_without_parsed_content() -> None:
+    unparsed = parsed_response()
+    unparsed.output_parsed = None
+
+    with pytest.raises(AIExplanationUnavailable):
+        await provider(FakeResponses([unparsed])).explain(
+            build_explanation_input(analysis_run())
+        )
+
+
+@pytest.mark.parametrize(
+    "output",
+    [object(), (SimpleNamespace(type="message", content=object()),)],
+)
+async def test_provider_rejects_malformed_response_output(output: object) -> None:
+    malformed = parsed_response()
+    malformed.output = output
+
+    with pytest.raises(AIExplanationUnavailable):
+        await provider(FakeResponses([malformed])).explain(
             build_explanation_input(analysis_run())
         )
 
@@ -458,6 +692,118 @@ async def test_provider_timeout_is_unavailable_without_retry() -> None:
 
     assert len(responses.calls) == 1
     assert "api" not in str(raised.value).lower()
+
+
+async def test_provider_retry_receives_only_the_remaining_total_budget() -> None:
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    response = httpx.Response(500, request=request)
+    server_error = InternalServerError(
+        "provider unavailable", response=response, body=None
+    )
+
+    class DelayedRetryResponses(FakeResponses):
+        async def parse(self, **values: object) -> object:
+            self.calls.append(values)
+            if len(self.calls) == 1:
+                await asyncio.sleep(0.01)
+                raise server_error
+            return parsed_response()
+
+    responses = DelayedRetryResponses([])
+
+    await provider(responses, timeout_seconds=0.1).explain(
+        build_explanation_input(analysis_run())
+    )
+
+    first_timeout = float(responses.calls[0]["timeout"])
+    second_timeout = float(responses.calls[1]["timeout"])
+    assert 0 < second_timeout < first_timeout <= 0.1
+
+
+async def test_provider_returns_at_deadline_when_cancellation_is_suppressed() -> None:
+    finished = asyncio.Event()
+
+    class CancellationSuppressingResponses(FakeResponses):
+        async def parse(self, **values: object) -> object:
+            self.calls.append(values)
+            try:
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.05)
+                finished.set()
+                return parsed_response()
+
+    responses = CancellationSuppressingResponses([])
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    with pytest.raises(AIExplanationUnavailable):
+        await provider(responses, timeout_seconds=0.005).explain(
+            build_explanation_input(analysis_run())
+        )
+
+    assert loop.time() - started < 0.03
+    await asyncio.wait_for(finished.wait(), timeout=0.2)
+    assert len(responses.calls) == 1
+
+
+async def test_provider_consumes_late_task_exception_after_deadline() -> None:
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    response = httpx.Response(500, request=request)
+    server_error = InternalServerError(
+        "provider unavailable", response=response, body=None
+    )
+    finished = asyncio.Event()
+
+    class LateErrorResponses(FakeResponses):
+        async def parse(self, **values: object) -> object:
+            self.calls.append(values)
+            try:
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.01)
+                finished.set()
+                raise server_error
+
+    loop = asyncio.get_running_loop()
+    contexts: list[dict[str, object]] = []
+    responses = LateErrorResponses([])
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+    try:
+        with pytest.raises(AIExplanationUnavailable):
+            await provider(responses, timeout_seconds=0.005).explain(
+                build_explanation_input(analysis_run())
+            )
+        await asyncio.wait_for(finished.wait(), timeout=0.2)
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert contexts == []
+    assert len(responses.calls) == 1
+
+
+async def test_provider_rejects_response_completing_at_exact_deadline() -> None:
+    class DeadlineClock:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self) -> float:
+            self.calls += 1
+            return 0 if self.calls <= 2 else 0.01
+
+    exact_deadline_provider = OpenAIExplanationProvider(
+        client=SimpleNamespace(responses=FakeResponses([parsed_response()])),
+        model="gpt-5.6",
+        input_cost_per_million=Decimal("2.50"),
+        output_cost_per_million=Decimal("10.00"),
+        timeout_seconds=0.01,
+        monotonic=DeadlineClock(),
+    )
+
+    with pytest.raises(AIExplanationUnavailable):
+        await exact_deadline_provider.explain(build_explanation_input(analysis_run()))
 
 
 @pytest.mark.parametrize(
@@ -504,6 +850,21 @@ def test_ai_configuration_is_optional_when_provider_is_disabled() -> None:
     assert settings.openai_input_cost_per_million is None
     assert settings.openai_output_cost_per_million is None
     assert settings.openai_model == "gpt-5.6"
+
+
+def test_ai_configuration_rejects_model_alias_override() -> None:
+    with pytest.raises(ValidationError):
+        AppSettings(**settings_values(), openai_model="gpt-5.6-2026-08-01")
+
+
+def test_provider_rejects_model_alias_override() -> None:
+    with pytest.raises(ValueError, match="gpt-5.6"):
+        OpenAIExplanationProvider(
+            client=SimpleNamespace(responses=FakeResponses([])),
+            model="gpt-5.6-2026-08-01",
+            input_cost_per_million=Decimal("2.50"),
+            output_cost_per_million=Decimal("10.00"),
+        )
 
 
 def test_ai_configuration_requires_both_prices_when_api_key_is_present() -> None:

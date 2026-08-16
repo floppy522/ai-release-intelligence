@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import unicodedata
 from decimal import Decimal
 from typing import Annotated, Literal, Protocol
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StringConstraints
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    StringConstraints,
+)
 
 FindingSeverity = Literal[
     "BLOCKING",
@@ -15,20 +23,63 @@ FindingSeverity = Literal[
 ExplanationConfidence = Literal["LOW", "MEDIUM", "HIGH"]
 AI_EXPLANATION_PENDING_CONTENT = '{"state":"pending"}'
 AI_EXPLANATION_UNAVAILABLE_CONTENT = '{"state":"unavailable"}'
+UNSAFE_UNICODE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
+def normalize_safe_unicode(
+    value: object,
+    *,
+    maximum: int,
+    truncate: bool = False,
+) -> str:
+    """NFC-normalize and bound text after rejecting unsafe Unicode categories."""
+
+    if type(value) is not str:
+        raise ValueError("safe text must be a string")
+    normalized = unicodedata.normalize("NFC", value)
+    if any(
+        unicodedata.category(character) in UNSAFE_UNICODE_CATEGORIES
+        for character in normalized
+    ):
+        raise ValueError("safe text contains a prohibited Unicode character")
+    stripped = normalized.strip()
+    if truncate:
+        return stripped[:maximum]
+    if len(stripped) > maximum:
+        raise ValueError("safe text exceeds its code-point limit")
+    return stripped
+
+
+def _normalize_text(value: object) -> str:
+    return normalize_safe_unicode(value, maximum=2_000)
+
+
+def _normalize_label(value: object) -> str:
+    return normalize_safe_unicode(value, maximum=200)
+
+
+def _normalize_identifier(value: object) -> str:
+    return normalize_safe_unicode(value, maximum=255)
+
+
 BoundedText = Annotated[
     str,
+    BeforeValidator(_normalize_text),
     StringConstraints(strip_whitespace=True, min_length=1, max_length=2_000),
 ]
 BoundedLabel = Annotated[
     str,
+    BeforeValidator(_normalize_label),
     StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
 ]
 BoundedIdentifier = Annotated[
     str,
+    BeforeValidator(_normalize_identifier),
     StringConstraints(strip_whitespace=True, min_length=1, max_length=255),
 ]
 ModelIdentifier = Annotated[
     str,
+    BeforeValidator(_normalize_label),
     StringConstraints(
         strip_whitespace=True,
         min_length=1,

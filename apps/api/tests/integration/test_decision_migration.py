@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import UUID
 
 import asyncpg
+import pytest
 
 API_ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY_ID = UUID("10000000-0000-0000-0000-000000000001")
@@ -20,6 +21,9 @@ FINDING_ID = UUID("50000000-0000-0000-0000-000000000005")
 EVIDENCE_ID = UUID("60000000-0000-0000-0000-000000000006")
 DECISION_ID = UUID("70000000-0000-0000-0000-000000000007")
 POLICY_ID = UUID("80000000-0000-0000-0000-000000000008")
+EXPLANATION_ID = UUID("90000000-0000-0000-0000-000000000009")
+PENDING_RUN_ID = UUID("30000000-0000-0000-0000-000000000013")
+PENDING_EXPLANATION_ID = UUID("90000000-0000-0000-0000-000000000019")
 NOW = datetime(2026, 8, 7, 14, 30, tzinfo=UTC)
 
 
@@ -209,9 +213,9 @@ async def test_upgrade_from_0002_rejects_incomplete_legacy_audit_data() -> None:
         )
         postgres = await asyncpg.connect(_asyncpg_url(database_url))
         try:
-            assert await postgres.fetchval("SELECT version_num FROM alembic_version") == (
-                "0002_policy_config"
-            )
+            assert await postgres.fetchval(
+                "SELECT version_num FROM alembic_version"
+            ) == ("0002_policy_config")
         finally:
             await postgres.close()
     finally:
@@ -221,3 +225,76 @@ async def test_upgrade_from_0002_rejects_incomplete_legacy_audit_data() -> None:
         finally:
             await postgres.close()
         _alembic("upgrade", "head")
+
+
+async def test_upgrade_from_0003_preserves_terminal_rows_and_unlocks_pending() -> None:
+    database_url = _database_url()
+    _alembic("downgrade", "0003_decision_assessments")
+    postgres = await asyncpg.connect(_asyncpg_url(database_url))
+    try:
+        await postgres.execute("TRUNCATE TABLE repository_connections CASCADE")
+        await postgres.execute(
+            "INSERT INTO repository_connections "
+            "(id, provider, external_repository_id, full_name) "
+            "VALUES ($1, 'github', '987654', 'acme/widgets')",
+            REPOSITORY_ID,
+        )
+        await postgres.execute(
+            "INSERT INTO releases "
+            "(id, repository_id, github_milestone_number, name) "
+            "VALUES ($1, $2, 7, 'Milestone 7')",
+            RELEASE_ID,
+            REPOSITORY_ID,
+        )
+        await postgres.executemany(
+            "INSERT INTO analysis_runs "
+            "(id, release_id, policy_version, source_fetched_at, state, "
+            "assessment_status, started_at, completed_at) "
+            "VALUES ($1, $2, 'configuration:1', $3, 'COMPLETED', "
+            "'NOT_READY', $3, $3)",
+            ((RUN_ID, RELEASE_ID, NOW), (PENDING_RUN_ID, RELEASE_ID, NOW)),
+        )
+        await postgres.executemany(
+            "INSERT INTO ai_explanations (id, analysis_run_id, content) "
+            "VALUES ($1, $2, $3)",
+            (
+                (
+                    EXPLANATION_ID,
+                    RUN_ID,
+                    '{"state":"available","explanation":{},"metadata":{}}',
+                ),
+                (
+                    PENDING_EXPLANATION_ID,
+                    PENDING_RUN_ID,
+                    '{"state":"pending"}',
+                ),
+            ),
+        )
+    finally:
+        await postgres.close()
+
+    _alembic("upgrade", "head")
+    postgres = await asyncpg.connect(_asyncpg_url(database_url))
+    try:
+        await postgres.execute(
+            'UPDATE ai_explanations SET content = \'{"state":"unavailable"}\' '
+            "WHERE id = $1",
+            PENDING_EXPLANATION_ID,
+        )
+        with pytest.raises(asyncpg.PostgresError, match="state transition"):
+            await postgres.execute(
+                "UPDATE ai_explanations SET content = "
+                '\'{"state":"unavailable"}\' WHERE id = $1',
+                EXPLANATION_ID,
+            )
+        with pytest.raises(asyncpg.PostgresError, match="deleted directly"):
+            await postgres.execute(
+                "DELETE FROM ai_explanations WHERE id = $1", EXPLANATION_ID
+            )
+
+        await postgres.execute(
+            "DELETE FROM repository_connections WHERE id = $1", REPOSITORY_ID
+        )
+        assert await postgres.fetchval("SELECT count(*) FROM ai_explanations") == 0
+    finally:
+        await postgres.close()

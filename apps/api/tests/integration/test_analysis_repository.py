@@ -20,7 +20,7 @@ from uuid import UUID
 
 import asyncpg
 import pytest
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from release_intelligence.adapters.persistence.repositories import (
     AnalysisRepository,
@@ -34,8 +34,13 @@ from release_intelligence.domain.models import (
     ReleaseSnapshot,
     ReleaseStatus,
 )
+from release_intelligence.ports.ai import (
+    AI_EXPLANATION_PENDING_CONTENT,
+    AI_EXPLANATION_UNAVAILABLE_CONTENT,
+)
 
 API_ROOT = Path(__file__).resolve().parents[2]
+AVAILABLE_EXPLANATION_CONTENT = '{"state":"available","explanation":{},"metadata":{}}'
 
 
 class CreateRunArguments(TypedDict):
@@ -374,6 +379,126 @@ async def test_create_run_records_distinct_clocked_start_and_completion_times(
     assert persisted["completed_at"] == completed_at
     assert persisted["completed_at"] > persisted["started_at"]
     assert persisted["completed_at"] != persisted["source_fetched_at"]
+
+
+async def test_ai_explanation_reservation_transitions_once_to_success(
+    repository: AnalysisRepository,
+    fixture_run: CreateRunArguments,
+    postgres: asyncpg.Connection,
+) -> None:
+    run_id = await repository.create_run(**fixture_run)
+
+    assert await repository.reserve_explanation(run_id) is True
+    await repository.complete_explanation(run_id, AVAILABLE_EXPLANATION_CONTENT)
+
+    assert await repository.load_explanation(run_id) == AVAILABLE_EXPLANATION_CONTENT
+    with pytest.raises(SQLAlchemyError, match="state transition rejected"):
+        await repository.fail_explanation(run_id)
+    with pytest.raises(asyncpg.PostgresError, match="state transition"):
+        await postgres.execute(
+            "UPDATE ai_explanations SET content = $1 WHERE analysis_run_id = $2",
+            AI_EXPLANATION_UNAVAILABLE_CONTENT,
+            run_id,
+        )
+
+
+async def test_ai_explanation_reservation_transitions_once_to_failure(
+    repository: AnalysisRepository,
+    fixture_run: CreateRunArguments,
+) -> None:
+    run_id = await repository.create_run(**fixture_run)
+
+    assert await repository.reserve_explanation(run_id) is True
+    await repository.fail_explanation(run_id)
+
+    assert await repository.load_explanation(run_id) == (
+        AI_EXPLANATION_UNAVAILABLE_CONTENT
+    )
+    with pytest.raises(SQLAlchemyError, match="state transition rejected"):
+        await repository.complete_explanation(run_id, AVAILABLE_EXPLANATION_CONTENT)
+
+
+async def test_ai_explanation_transition_rollback_preserves_pending_reservation(
+    repository: AnalysisRepository,
+    fixture_run: CreateRunArguments,
+    postgres: asyncpg.Connection,
+) -> None:
+    run_id = await repository.create_run(**fixture_run)
+    assert await repository.reserve_explanation(run_id) is True
+
+    class SimulatedCrash(RuntimeError):
+        pass
+
+    with pytest.raises(SimulatedCrash):
+        async with postgres.transaction():
+            await postgres.execute(
+                "UPDATE ai_explanations SET content = $1 WHERE analysis_run_id = $2",
+                AVAILABLE_EXPLANATION_CONTENT,
+                run_id,
+            )
+            raise SimulatedCrash()
+
+    assert await repository.load_explanation(run_id) == AI_EXPLANATION_PENDING_CONTENT
+
+
+async def test_ai_explanation_direct_insert_mutation_and_delete_are_rejected(
+    repository: AnalysisRepository,
+    fixture_run: CreateRunArguments,
+    postgres: asyncpg.Connection,
+) -> None:
+    run_id = await repository.create_run(**fixture_run)
+    explanation_id = UUID("90000000-0000-0000-0000-000000000009")
+
+    with pytest.raises(asyncpg.PostgresError, match="invalid initial"):
+        await postgres.execute(
+            "INSERT INTO ai_explanations (id, analysis_run_id, content) "
+            "VALUES ($1, $2, $3)",
+            explanation_id,
+            run_id,
+            AVAILABLE_EXPLANATION_CONTENT,
+        )
+
+    assert await repository.reserve_explanation(run_id) is True
+    with pytest.raises(asyncpg.PostgresError, match="state transition"):
+        await postgres.execute(
+            "UPDATE ai_explanations SET id = $1, content = $2 "
+            "WHERE analysis_run_id = $3",
+            explanation_id,
+            AI_EXPLANATION_UNAVAILABLE_CONTENT,
+            run_id,
+        )
+    with pytest.raises(asyncpg.PostgresError, match="deleted directly"):
+        await postgres.execute(
+            "DELETE FROM ai_explanations WHERE analysis_run_id = $1", run_id
+        )
+
+    await postgres.execute("DELETE FROM analysis_runs WHERE id = $1", run_id)
+    assert await postgres.fetchval("SELECT count(*) FROM ai_explanations") == 0
+
+
+async def test_concurrent_ai_explanation_transitions_have_one_terminal_winner(
+    database_url: str,
+    repository: AnalysisRepository,
+    fixture_run: CreateRunArguments,
+) -> None:
+    run_id = await repository.create_run(**fixture_run)
+    assert await repository.reserve_explanation(run_id) is True
+    contenders = [AnalysisRepository(database_url), AnalysisRepository(database_url)]
+    try:
+        outcomes = await asyncio.gather(
+            contenders[0].complete_explanation(run_id, AVAILABLE_EXPLANATION_CONTENT),
+            contenders[1].fail_explanation(run_id),
+            return_exceptions=True,
+        )
+    finally:
+        await asyncio.gather(*(item.close() for item in contenders))
+
+    assert sum(outcome is None for outcome in outcomes) == 1
+    assert sum(isinstance(outcome, SQLAlchemyError) for outcome in outcomes) == 1
+    assert await repository.load_explanation(run_id) in {
+        AVAILABLE_EXPLANATION_CONTENT,
+        AI_EXPLANATION_UNAVAILABLE_CONTENT,
+    }
 
 
 async def test_concurrent_creates_share_one_release_identity(

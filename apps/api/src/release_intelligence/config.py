@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization
@@ -28,7 +28,7 @@ class AppSettings(BaseSettings):
     session_ttl_seconds: Annotated[int, Field(gt=0, le=7 * 24 * 60 * 60)] = 8 * 60 * 60
     oauth_state_ttl_seconds: Annotated[int, Field(gt=0, le=60 * 60)] = 10 * 60
     openai_api_key: SecretStr | None = None
-    openai_model: Annotated[str, Field(min_length=1, max_length=200)] = "gpt-5.6"
+    openai_model: Literal["gpt-5.6"] = "gpt-5.6"
     openai_input_cost_per_million: (
         Annotated[
             Decimal,

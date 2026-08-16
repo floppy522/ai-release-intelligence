@@ -9,113 +9,135 @@ request after the authoritative deterministic report. Disabled, refused, timed
 out, malformed, ungrounded, or failed explanations collapse to HTTP 200
 `{"state":"unavailable"}`.
 
+Fix round 1 closes the persistence-transition, mixed-refusal, free-form prose,
+exact-model, Unicode, and absolute-deadline findings. No live OpenAI request,
+SQLite database, remote database, or remote migration was used.
+
 ## TDD evidence
 
-### Grounding and provider RED/GREEN
+### Grounding, provider, and configuration
 
-- Initial focused RED failed collection because the official `openai` package was
-  absent. After adding the official package and lock, RED moved to the intended
-  missing application boundary: `release_intelligence.adapters.ai` did not exist.
-- The first grounding/provider GREEN was 22 passed. Additional schema, refusal,
-  rate-limit, and non-retryable-status cases brought focused grounding coverage to
-  33 tests.
+- Initial Task 13 RED first failed because the official `openai` package and AI
+  boundary did not exist. The official `openai==3.1.0` dependency and lock were
+  added normally, with provider behavior tested only through injected fakes.
+- Fix-round review reproduction confirmed all five application/provider findings
+  against the committed code. Persistence RED was two failures and one error
+  because head ended at 0003 and the guarded trigger did not exist. Exact-model
+  RED was two failures; mixed-refusal/output RED was three failures; the four new
+  grounding cases all failed; backend Unicode RED was nine failures; and deadline
+  RED was four failures.
 - The prompt projection includes only immutable normalized assessment facts:
   deterministic status, bounded release name/freshness, stored finding IDs,
   deterministic rule/severity/summary/action, and bounded evidence IDs/type/source
-  IDs. It excludes snapshot bodies, check log content, comments, code, URLs,
-  fingerprints, candidate SHA, credentials, actor reasons, and arbitrary prompts.
-- All blocking, decision-required, and insufficient-data findings are included;
-  other warning/advisory findings are limited to 20. Untrusted names and titles are
-  NFC-normalized, control-cleaned, and truncated to 200 Unicode code points.
-- Model output uses an exact extra-forbidden Pydantic Structured Outputs schema
-  containing only `summary`, `groups`, `actions`, `limitations`, `confidence`,
-  `finding_ids`, and `evidence_ids`. Provider metadata is a Pydantic private
-  attribute and is absent from the model-facing schema.
-- Application validation rejects unknown or duplicate IDs, evidence not linked to
-  the cited finding, severity conflicts, invented actions, unlinked actions,
-  repeated/conflicting finding groups/actions, mismatched summary references, and
-  malformed or unbounded values. Accepted collections are normalized into a safe
-  deterministic order.
+  IDs. It excludes bodies, comments, code, logs, URLs, fingerprints, candidate
+  SHAs, credentials, actor reasons, secrets, and arbitrary prompts. All critical
+  findings and at most 20 warnings are included.
+- A single backend Unicode policy NFC-normalizes strings, rejects `Cc`, `Cf`
+  (including bidi controls), `Cs` (including lone surrogates), `Zl`, and `Zp`, and
+  enforces Python code-point limits. Prompt labels are normalized before their
+  200-code-point truncation; structured output fields use the same policy without
+  truncating. Tests cover controls, bidi, surrogates, line/paragraph separators,
+  NFD input, and exact 200/201 astral-code-point boundaries.
+- Structured output retains the required strict Pydantic schema fields. The
+  application now requires exact coverage of every supplied finding and evidence
+  ID, exactly one group and action occurrence per finding, deterministic severity,
+  exact supplied actions, and the exact deterministic evidence union for every
+  group and action. Unknown, omitted, duplicate, conflicting, partially grounded,
+  or over-bounded content is rejected.
+- AI can choose only bounded grouping. Accepted `summary`, group title/prose,
+  limitations, confidence, ID order, and action/reference order are replaced with
+  deterministic canonical values and ordering. Thus hostile claims using otherwise
+  valid IDs cannot reach rendering. Legitimate multi-finding groups and input
+  permutations are covered.
+- Configuration and provider construction accept only the literal model alias
+  `gpt-5.6`; any direct or environment-derived substitution fails validation.
+  `OPENAI_API_KEY` remains optional. Prices remain required only when enabled and
+  are bounded nonnegative `Decimal` values.
 
-### Provider and metadata boundary
+### Provider request, refusal, deadline, and metadata boundary
 
-- Added official `openai==3.1.0` through normal `uv add`, updating both
-  `pyproject.toml` and `uv.lock`. No live provider request was made.
-- The installed SDK's typed `AsyncResponses.parse` interface matches the plan:
-  `model`, `input`, `text_format`, and `store` remain supported. The current SDK
-  also exposes a per-call `timeout`; the implementation retains the plan's outer
-  total-budget timeout so a retry cannot reset the 15-second budget.
-- Each permitted generation performs one logical `responses.parse` Structured
-  Outputs operation using exact alias `gpt-5.6`, `text_format=AIExplanation`,
-  `store=False`, and no tools. The production SDK client has internal retries
-  disabled. One application retry is allowed only for 429 or 5xx while time remains.
-- Refusal, timeout, SDK/API error, parse error, invalid usage, cost overflow, and
-  schema/reference rejection expose only the safe unavailable state.
-- Metadata records the provider-observed model, elapsed latency, observed input and
-  output tokens, and a six-decimal `Decimal` cost calculated only from required
-  configured current per-million prices. Model names, prices, tokens, latency, and
-  cost are finite, nonnegative, and bounded before logging or response serialization.
+- The installed SDK's current typed `AsyncResponses.parse` accepts `model`,
+  `input`, `text_format`, `store`, and the per-call `timeout` argument. Production
+  calls use exact `gpt-5.6`, `text_format=AIExplanation`, `store=False`, no tools,
+  and an SDK client with internal retries disabled.
+- Before reading `output_parsed`, the provider walks every `response.output`
+  message/content item. Any refusal, including mixed refusal plus parsed text, is
+  unavailable. Refusal-only, mixed, parsed-only, malformed output, and missing
+  parsed content are covered.
+- Every attempt receives only the remaining absolute 15-second budget as its SDK
+  timeout. An outer `asyncio.wait` uses the same deadline. At expiry, the provider
+  detaches and cancels the SDK task without awaiting cancellation-suppressing work,
+  returns unavailable immediately, owns the late task, and consumes its eventual
+  result/exception. Exact-deadline results are rejected. Only the first 429/5xx may
+  retry, and only while budget remains; timeout never retries.
+- Metadata records provider-observed model, elapsed latency, observed input/output
+  tokens, and six-decimal cost computed with `Decimal` from required configured
+  per-million prices. Models, latency, usage, prices, arithmetic, and cost remain
+  bounded before response serialization. Raw prompts, secrets, keys, and provider
+  errors are not logged or exposed.
 
-### Route/configuration RED/GREEN
+### PostgreSQL transition and retention contract
 
-- The route/configuration RED was exactly 14 failures: seven missing optional and
-  bounded settings plus seven missing route/wiring behaviors. Focused GREEN was 36
-  passed before later single-attempt coverage.
-- `OPENAI_API_KEY` remains optional (`ARI_OPENAI_API_KEY` under the application's
-  existing environment prefix). With no key, prices remain unset, startup succeeds,
-  no OpenAI client is constructed, and the route returns unavailable. With a key,
-  both current Decimal input/output prices are mandatory and bounded. The default
-  model is exactly `gpt-5.6`.
-- The route loads only the stored analysis run, authenticates the current session,
-  verifies repository authorization before provider access, and inherits the
-  global unsafe-method CSRF enforcement. Unauthorized runs are hidden as 404.
-- A final lifecycle audit added a repeated-request RED: four route cases showed two
-  provider calls where only one was allowed. The single-attempt service guard and
-  production reservation store made all eight route cases green. The existing
-  unique `ai_explanations.analysis_run_id` row atomically reserves a run before the
-  provider call, records either bounded available content or terminal unavailable,
-  and prevents repeated or concurrent service instances from invoking the provider
-  again. No migration was needed. Injected/fake services enforce the same invariant
-  in memory.
+- Migration `0004_ai_explanation_transitions` replaces 0001's blanket explanation
+  UPDATE trigger. New rows must be structurally exact pending reservations.
+- A pending row can transition exactly once to exact unavailable or to an available
+  object containing exactly `state`, object `explanation`, and object `metadata`.
+  Its ID, analysis-run ownership, and creation time cannot change. Pending no-op,
+  invalid terminal shapes, terminal updates, direct deletes, and terminal inserts
+  fail at the database boundary.
+- Direct explanation deletion is rejected at trigger depth one. Nested repository
+  retention cascades remain permitted, matching the existing PostgreSQL retention
+  design. Downgrade restores the original immutable UPDATE trigger.
+- Real PostgreSQL contracts cover upgrade from 0003 with historical terminal and
+  pending rows, success/failure terminals, transaction rollback/crash behavior,
+  forbidden insert/mutation/delete, parent cascade, and concurrent one-winner
+  transitions. They were collected only; PostgreSQL was unavailable, so this
+  report does not claim runtime PostgreSQL GREEN.
 
-### UI RED/GREEN
+### Route and UI boundary
 
-- Initial UI RED failed because `AIExplanation.tsx` did not exist. Component GREEN
-  is six tests covering labeling, deterministic-status separation, grounded action
-  rendering, no AI-created evidence links, escaped hostile text, and accessible
-  loading/unavailable/disabled states.
-- The report places the optional AI section after deterministic verdict, findings,
-  required actions, decisions, and supporting evidence. It visually uses a dashed,
-  muted panel and explicitly says it cannot change the deterministic report.
-- The authenticated App presents an opt-in generation button, sends same-origin
-  CSRF-protected POST, handles loading/available/unavailable without hiding the
-  deterministic report, validates the bounded response shape before rendering, and
-  never converts AI evidence IDs into links.
+- The POST route remains authenticated, repository-authorized, and protected by
+  global unsafe-method CSRF enforcement. It loads only the immutable persisted
+  assessment and never persists or changes readiness. Unauthorized runs remain
+  hidden as 404; every provider/refusal/validation/persistence failure returns the
+  exact sanitized unavailable response.
+- With no key, production wiring creates no OpenAI client or explanation service;
+  startup succeeds and the authorized route returns unavailable. The unique
+  explanation reservation still permits one logical provider attempt per run
+  across repeated/concurrent service instances.
+- The UI remains visibly subordinate to the deterministic report, labels the
+  section “AI explanation,” repeats but does not replace deterministic readiness,
+  renders no AI-created evidence links, safely escapes content, and covers idle,
+  loading, unavailable, disabled, and available states.
+- The client response boundary requires NFC, matching prohibited Unicode
+  categories, trimmed nonempty strings, and `Array.from` code-point bounds. It
+  rejects bidi, control, surrogate, separator, non-NFC, and 201-astral-character
+  payloads while accepting exactly 200 astral characters.
 
 ## Verification
 
-- Backend unit/contract/non-database integration: 672 passed with `-W error` and
-  deterministic Hypothesis seed `0`.
-- Focused AI grounding/route coverage: 41 passed.
-- Backend Ruff: passed.
-- Strict mypy: passed for 43 source files.
-- Scoped Ruff formatting: passed.
-- Frontend Vitest: 54 passed across six files.
-- Frontend TypeScript, ESLint, and Vite production build: passed.
+- Backend unit/contract/non-database route integration: 702 passed with
+  `-W error --hypothesis-seed=0`.
+- Focused grounding/provider/migration: 63 passed; focused route/auth/fallback:
+  8 passed.
+- Backend Ruff and strict mypy: passed for 43 source files. Scoped Ruff formatting:
+  passed.
+- Frontend Vitest: 61 passed across six files. TypeScript, ESLint, and Vite
+  production build: passed.
 - `uv lock --check --offline`: 53 packages resolved.
 - `pnpm install --frozen-lockfile --offline`: up to date.
-- Offline PostgreSQL SQL generation: `0001_initial:head` upgrade and
-  `head:0001_initial` downgrade passed using an explicit non-connecting local dummy
-  URL.
-- PostgreSQL integration collection: 33 repository/migration contracts.
+- Offline PostgreSQL upgrade through 0004 and full 0004-to-base downgrade SQL:
+  generated successfully.
+- PostgreSQL integration collection: 39 contracts, including six new explanation
+  transition/upgrade contracts; not executed locally.
 - `git diff --check`: passed.
 
 ## Concerns
 
-PostgreSQL is unavailable locally by project constraint, so the real database
-contracts were collected but not executed; no SQLite or remote substitute was
-used. The production single-attempt adapter uses the existing PostgreSQL
-`ai_explanations` unique row and required no schema change. A process crash after
-reservation intentionally leaves that run unavailable rather than risking a second
-provider request, preserving the stricter one-attempt and deterministic-fallback
-contract.
+PostgreSQL is unavailable locally by project constraint, so real database runtime
+and migration contracts were collected but not executed; no SQLite or remote
+substitute was used. A process crash after a committed pending reservation
+intentionally leaves that run unavailable rather than risking a second provider
+attempt. If an SDK coroutine ignores cancellation, the route still returns at the
+absolute deadline; the provider retains that task only until it finishes so a late
+exception cannot become unhandled.

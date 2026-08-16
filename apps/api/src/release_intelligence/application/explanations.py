@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import unicodedata
 from collections.abc import Iterable
 from typing import Literal, cast
 from uuid import UUID
@@ -23,6 +22,7 @@ from release_intelligence.ports.ai import (
     ExplanationInput,
     ExplanationMetadata,
     FindingSeverity,
+    normalize_safe_unicode,
 )
 from release_intelligence.ports.repositories import StoredAnalysisRun
 
@@ -57,12 +57,11 @@ class _CachedExplanation(BaseModel):
 
 
 def _safe_untrusted_text(value: str) -> str:
-    normalized = unicodedata.normalize("NFC", value)
-    without_controls = "".join(
-        " " if unicodedata.category(character) == "Cc" else character
-        for character in normalized
+    return normalize_safe_unicode(
+        value,
+        maximum=MAX_UNTRUSTED_CHARACTERS,
+        truncate=True,
     )
-    return without_controls.strip()[:MAX_UNTRUSTED_CHARACTERS]
 
 
 def _selected_findings(run: StoredAnalysisRun) -> tuple[ReadinessFinding, ...]:
@@ -144,16 +143,28 @@ class ExplanationValidator:
             self._validate_duplicates(candidate)
         except (TypeError, ValueError, ValidationError):
             raise AIExplanationRejected() from None
-        normalized = candidate.model_copy(
-            update={
-                "groups": tuple(sorted(candidate.groups, key=_group_key)),
-                "actions": tuple(sorted(candidate.actions, key=_action_key)),
-                "limitations": tuple(
-                    sorted(candidate.limitations, key=lambda value: value.casefold())
-                ),
-                "finding_ids": tuple(sorted(candidate.finding_ids)),
-                "evidence_ids": tuple(sorted(candidate.evidence_ids)),
-            }
+        normalized_groups = tuple(
+            sorted(
+                (_canonical_group(group) for group in candidate.groups),
+                key=_group_key,
+            )
+        )
+        normalized_actions = tuple(
+            sorted(
+                (_canonical_action(action) for action in candidate.actions),
+                key=_action_key,
+            )
+        )
+        normalized = AIExplanation(
+            summary=_canonical_summary(
+                len(self._findings), self._input.deterministic_status
+            ),
+            groups=normalized_groups,
+            actions=normalized_actions,
+            limitations=self._input.limitations,
+            confidence="HIGH",
+            finding_ids=tuple(sorted(candidate.finding_ids)),
+            evidence_ids=tuple(sorted(candidate.evidence_ids)),
         )
         if explanation.metadata is not None:
             normalized.attach_metadata(explanation.metadata)
@@ -162,35 +173,38 @@ class ExplanationValidator:
     def _validate_references(self, explanation: AIExplanation) -> None:
         finding_ids = set(explanation.finding_ids)
         evidence_ids = set(explanation.evidence_ids)
-        if not finding_ids.issubset(self._findings):
-            raise ValueError("unsupported finding reference")
-        if not evidence_ids.issubset(self._evidence_to_findings):
-            raise ValueError("unsupported evidence reference")
-        if any(
-            not (self._evidence_to_findings[evidence_id] & finding_ids)
-            for evidence_id in evidence_ids
-        ):
-            raise ValueError("evidence is not linked to a referenced finding")
-        nested_finding_ids = {
+        if finding_ids != set(self._findings):
+            raise ValueError(
+                "finding references must exactly match deterministic input"
+            )
+        if evidence_ids != set(self._evidence_to_findings):
+            raise ValueError(
+                "evidence references must exactly match deterministic input"
+            )
+        grouped_finding_ids = {
             identifier
             for group in explanation.groups
             for identifier in group.finding_ids
-        } | {
+        }
+        action_finding_ids = {
             identifier
             for action in explanation.actions
             for identifier in action.finding_ids
         }
-        nested_evidence_ids = {
+        grouped_evidence_ids = {
             identifier
             for group in explanation.groups
             for identifier in group.evidence_ids
-        } | {
+        }
+        action_evidence_ids = {
             identifier
             for action in explanation.actions
             for identifier in action.evidence_ids
         }
-        if nested_finding_ids != finding_ids or nested_evidence_ids != evidence_ids:
-            raise ValueError("summary references do not match grounded content")
+        if grouped_finding_ids != finding_ids or action_finding_ids != finding_ids:
+            raise ValueError("every finding must have one group and action")
+        if grouped_evidence_ids != evidence_ids or action_evidence_ids != evidence_ids:
+            raise ValueError("every evidence item must ground a group and action")
 
     def _validate_groups(self, explanation: AIExplanation) -> None:
         top_findings = set(explanation.finding_ids)
@@ -207,7 +221,7 @@ class ExplanationValidator:
                 for identifier in finding_ids
             ):
                 raise ValueError("group severity conflicts with deterministic facts")
-            self._require_linked_evidence(finding_ids, evidence_ids)
+            self._require_exact_evidence(finding_ids, evidence_ids)
 
     def _validate_actions(self, explanation: AIExplanation) -> None:
         top_findings = set(explanation.finding_ids)
@@ -224,16 +238,18 @@ class ExplanationValidator:
                 for identifier in finding_ids
             ):
                 raise ValueError("action was not supplied by deterministic findings")
-            self._require_linked_evidence(finding_ids, evidence_ids)
+            self._require_exact_evidence(finding_ids, evidence_ids)
 
-    def _require_linked_evidence(
+    def _require_exact_evidence(
         self, finding_ids: set[str], evidence_ids: set[str]
     ) -> None:
-        if any(
-            not (self._evidence_to_findings[identifier] & finding_ids)
-            for identifier in evidence_ids
-        ):
-            raise ValueError("evidence is not linked to this claim")
+        expected = {
+            evidence.evidence_id
+            for finding_id in finding_ids
+            for evidence in self._findings[finding_id].evidence
+        }
+        if evidence_ids != expected:
+            raise ValueError("evidence must exactly ground the referenced findings")
 
     @staticmethod
     def _validate_duplicates(explanation: AIExplanation) -> None:
@@ -380,3 +396,33 @@ def _group_key(group: ExplanationGroup) -> tuple[object, ...]:
 
 def _action_key(action: ExplanationAction) -> tuple[object, ...]:
     return (tuple(sorted(action.finding_ids)), action.action.casefold())
+
+
+def _canonical_summary(count: int, status: str) -> str:
+    noun = "finding is" if count == 1 else "findings are"
+    return (
+        f"{count} supplied deterministic {noun} organized below; "
+        f"readiness remains {status}."
+    )
+
+
+def _canonical_group(group: ExplanationGroup) -> ExplanationGroup:
+    count = len(group.finding_ids)
+    noun = "finding has" if count == 1 else "findings have"
+    return ExplanationGroup(
+        title=f"{group.severity} findings",
+        explanation=(
+            f"{count} supplied deterministic {noun} severity {group.severity}."
+        ),
+        severity=group.severity,
+        finding_ids=tuple(sorted(group.finding_ids)),
+        evidence_ids=tuple(sorted(group.evidence_ids)),
+    )
+
+
+def _canonical_action(action: ExplanationAction) -> ExplanationAction:
+    return ExplanationAction(
+        action=action.action,
+        finding_ids=tuple(sorted(action.finding_ids)),
+        evidence_ids=tuple(sorted(action.evidence_ids)),
+    )

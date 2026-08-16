@@ -13,7 +13,11 @@ from release_intelligence.api.dependencies import (
     CurrentUser,
     SessionRecord,
 )
-from release_intelligence.application.explanations import ExplanationService
+from release_intelligence.application.explanations import (
+    ExplanationService,
+    ExplanationValidator,
+    build_explanation_input,
+)
 from release_intelligence.domain.models import (
     EvidenceRef,
     ReadinessAssessment,
@@ -232,6 +236,9 @@ async def client(
 async def test_explanation_route_returns_validated_content_and_metadata() -> None:
     provider = FakeProvider(explanation())
     before = deepcopy(stored_run().assessment)
+    expected = ExplanationValidator(build_explanation_input(stored_run())).validate(
+        explanation()
+    )
     async with await client(provider=provider) as request:
         response = await request.post(f"/api/analyses/{RUN_ID}/explanation")
         repeated = await request.post(f"/api/analyses/{RUN_ID}/explanation")
@@ -239,8 +246,8 @@ async def test_explanation_route_returns_validated_content_and_metadata() -> Non
     assert response.status_code == 200
     assert response.json() == {
         "state": "available",
-        "explanation": explanation().model_dump(mode="json"),
-        "metadata": explanation().metadata.model_dump(mode="json"),
+        "explanation": expected.model_dump(mode="json"),
+        "metadata": expected.metadata.model_dump(mode="json"),
     }
     assert provider.inputs[0].deterministic_status == "NOT_READY"
     assert repeated.json() == response.json()
