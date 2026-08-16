@@ -288,7 +288,9 @@ async def _login(client: httpx.AsyncClient) -> tuple[str, str]:
         "/api/auth/github/callback", params={"code": "oauth-code", "state": state}
     )
     assert callback.status_code == 200
-    return callback.json()["csrf_token"], callback.headers["set-cookie"]
+    bootstrap = await client.get("/api/auth/csrf")
+    assert bootstrap.status_code == 200
+    return bootstrap.json()["csrf_token"], callback.headers["set-cookie"]
 
 
 async def test_oauth_callback_rejects_missing_mismatched_and_replayed_state(
@@ -310,6 +312,28 @@ async def test_oauth_callback_rejects_missing_mismatched_and_replayed_state(
 
     assert accepted.status_code == 200
     assert replayed.status_code == 400
+
+
+async def test_callback_exposes_no_csrf_and_bootstrap_is_the_secure_retrieval_path(
+    client: httpx.AsyncClient,
+) -> None:
+    start = await client.get("/api/auth/github/login", follow_redirects=False)
+    state = httpx.URL(start.headers["location"]).params["state"]
+    callback = await client.get(
+        "/api/auth/github/callback", params={"code": "oauth-code", "state": state}
+    )
+
+    assert callback.status_code == 200
+    assert callback.json() == {"authenticated": True}
+    assert "csrf_token" not in callback.text
+
+    bootstrap = await client.get("/api/auth/csrf")
+
+    assert bootstrap.status_code == 200
+    assert bootstrap.json()["csrf_token"]
+    assert bootstrap.headers["cache-control"] == "no-store"
+    assert bootstrap.headers["pragma"] == "no-cache"
+    assert bootstrap.headers["referrer-policy"] == "no-referrer"
 
 
 async def test_oauth_state_is_bound_to_the_browser_that_started_login(

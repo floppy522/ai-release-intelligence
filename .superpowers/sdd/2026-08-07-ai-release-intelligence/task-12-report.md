@@ -3,7 +3,7 @@
 ## Status
 
 Implemented the deterministic release assessment and decision-first report, then
-completed fix rounds 1 and 2 for all reported Important review findings. Readiness
+completed fix rounds 1–3 for all reported Important review findings. Readiness
 remains strictly rule-based with fixed precedence:
 
 1. `INSUFFICIENT_DATA` for incomplete, invalid, inconsistent, or stale evidence;
@@ -84,6 +84,20 @@ No numeric score or AI output participates in the result.
   visible non-production warning; the default route is a neutral landing state and
   never silently shows a READY fixture.
 
+### Fix round 3: single secure CSRF retrieval channel
+
+- Focused RED was one expected failure: the successful OAuth callback still
+  included the raw derived `csrf_token` in its JSON body.
+- The callback now returns only `{authenticated: true}` while retaining the
+  secure HttpOnly session cookie and server-side CSRF digest. The authenticated
+  `/api/auth/csrf` bootstrap is the sole raw-token retrieval channel and continues
+  to require the session, verify the digest, and emit `Cache-Control: no-store`,
+  `Pragma: no-cache`, and `Referrer-Policy: no-referrer`.
+- The shared auth integration helper now completes OAuth and then obtains its
+  token from the bootstrap, so unsafe-method and production-wiring tests exercise
+  the same contract as App. Focused GREEN is 7 passed with 7 deselected.
+- No frontend, persistence, schema, or PostgreSQL contract changed in this round.
+
 ## Backend design
 
 - Policy-dependent `assess` requires a validated `ReleasePolicy`. Production
@@ -120,6 +134,7 @@ No numeric score or AI output participates in the result.
   run/finding/fingerprint values; a successful decision refetches the run. The
   trusted fixture is isolated behind explicit `?demo=fixture` navigation and is
   visibly labeled.
+
 - Decision forms render only when overall status is `NEEDS_DECISION`, the server
   marks the exact finding eligible, and real UUID/fingerprint/CSRF values are
   present. Blocked, insufficient, stale, or malformed findings never get controls.
@@ -134,9 +149,9 @@ No numeric score or AI output participates in the result.
 
 ## Verification
 
-- Backend unit/contract/non-database integration: 630 passed,
+- Backend unit/contract/non-database integration: 631 passed,
   `-W error --hypothesis-seed=0`.
-- Non-database route integration: 46 passed, `-W error`.
+- Non-database route integration: 47 passed, `-W error`.
 - Backend Ruff: passed.
 - Strict mypy: passed for 38 source files.
 - Scoped Ruff formatting: modified Python files formatted.

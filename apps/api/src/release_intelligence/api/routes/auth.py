@@ -47,7 +47,6 @@ OAUTH_CALLBACK_PATH = "/api/auth/github/callback"
 
 class LoginResponse(BaseModel):
     authenticated: bool
-    csrf_token: str
 
 
 class CurrentUserResponse(BaseModel):
@@ -176,9 +175,7 @@ async def github_callback(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Authentication temporarily unavailable",
         )
-    response = JSONResponse(
-        LoginResponse(authenticated=True, csrf_token=csrf_token).model_dump()
-    )
+    response = JSONResponse(LoginResponse(authenticated=True).model_dump())
     _clear_oauth_binding(response)
     response.set_cookie(
         "session",
