@@ -1,4 +1,5 @@
 import type {
+  AnalysisRun,
   DecisionCreatePayload,
   HumanDecisionRecord,
   PolicyRecord,
@@ -20,6 +21,14 @@ export async function getDemoAnalysis(): Promise<ReadinessAssessment> {
   }
 
   return (await response.json()) as ReadinessAssessment;
+}
+
+export async function getAnalysisRun(runId: string): Promise<AnalysisRun> {
+  const response = await fetch(`/api/analyses/${encodeURIComponent(runId)}`, {
+    credentials: "same-origin",
+  });
+  if (!response.ok) throw new ApiError(response.status);
+  return (await response.json()) as AnalysisRun;
 }
 
 export async function getReleasePolicy(

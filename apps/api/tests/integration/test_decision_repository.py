@@ -7,7 +7,8 @@ import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -17,6 +18,7 @@ import pytest
 from release_intelligence.adapters.persistence.policies import PolicyRepository
 from release_intelligence.adapters.persistence.repositories import AnalysisRepository
 from release_intelligence.application.decisions import (
+    DecisionConflictError,
     DecisionFindingNotFoundError,
     DecisionKind,
     DecisionPersistenceError,
@@ -25,6 +27,7 @@ from release_intelligence.application.decisions import (
 from release_intelligence.domain.models import (
     EvidenceRef,
     ReadinessAssessment,
+    ReadinessFinding,
     ReleaseSnapshot,
     ReleaseStatus,
     SnapshotVersion,
@@ -114,7 +117,7 @@ def snapshot() -> ReleaseSnapshot:
             url="https://github.com/acme/widgets/runs/101",
             head_sha="a" * 40,
             status="completed",
-            conclusion="failure",
+            conclusion="success",
             started_at=NOW,
             completed_at=NOW,
         ),
@@ -163,8 +166,16 @@ async def decision_run(
     release_snapshot = snapshot()
     configured_policy = policy()
     findings = evaluate_checks(release_snapshot, configured_policy, decisions=())
+    noneligible = ReadinessFinding(
+        rule_id="operations.informational",
+        severity="ADVISORY",
+        summary="Stored non-decision context",
+        required_action="Review stored context",
+        evidence=(release_snapshot.issue_evidence,),
+    )
+    findings = (*findings, noneligible)
     assessment = ReadinessAssessment(
-        status=ReleaseStatus.NOT_READY,
+        status=ReleaseStatus.NEEDS_DECISION,
         findings=findings,
     )
     await repository.create_run(
@@ -196,7 +207,7 @@ async def decision_run(
         run_id,
     )
     blocking_id = next(
-        row["id"] for row in rows if row["rule_id"].startswith("checks.blocking")
+        row["id"] for row in rows if row["rule_id"] == "operations.informational"
     )
     advisory_id = next(
         row["id"] for row in rows if row["rule_id"].startswith("checks.advisory")
@@ -209,7 +220,7 @@ async def decision_run(
     return run_id, advisory_id, blocking_id, fingerprint
 
 
-async def test_changed_decision_appends_lineage_and_persists_each_reassessment(
+async def test_decision_persists_full_reassessment_and_rejects_resolved_run(
     repository: AnalysisRepository,
     postgres: asyncpg.Connection,
     decision_run: tuple[UUID, UUID, UUID, str],
@@ -226,15 +237,16 @@ async def test_changed_decision_appends_lineage_and_persists_each_reassessment(
         actor="github:7",
         authorized_repository_id=REPOSITORY_ID,
     )
-    blocked = await service.record_for_run(
-        run_id=run_id,
-        finding_id=finding_id,
-        fingerprint=fingerprint,
-        kind=DecisionKind.RELEASE_BLOCKER,
-        reason="New evidence requires remediation",
-        actor="github:8",
-        authorized_repository_id=REPOSITORY_ID,
-    )
+    with pytest.raises(DecisionConflictError):
+        await service.record_for_run(
+            run_id=run_id,
+            finding_id=finding_id,
+            fingerprint=fingerprint,
+            kind=DecisionKind.RELEASE_BLOCKER,
+            reason="New evidence requires remediation",
+            actor="github:8",
+            authorized_repository_id=REPOSITORY_ID,
+        )
 
     rows = await postgres.fetch(
         "SELECT id, decision, reason, actor_id, supersedes_decision_id, "
@@ -243,20 +255,17 @@ async def test_changed_decision_appends_lineage_and_persists_each_reassessment(
         "ORDER BY decision_sequence",
         run_id,
     )
-    assert len(rows) == 2
+    assert len(rows) == 1
     assert rows[0]["supersedes_decision_id"] is None
-    assert rows[1]["supersedes_decision_id"] == rows[0]["id"]
-    assert [row["decision_sequence"] for row in rows] == [1, 2]
+    assert [row["decision_sequence"] for row in rows] == [1]
     assert rows[0]["decision"] == "ACCEPTED_RISK"
     assert rows[0]["reason"] == "Reviewed by release lead"
     assert rows[0]["actor_id"] == "github:7"
-    assert rows[1]["decision"] == "RELEASE_BLOCKER"
     assert rows[0]["assessment_status"] == accepted.assessment.status.value
-    assert rows[1]["assessment_status"] == blocked.assessment.status.value
-    assert rows[0]["assessment_payload"] != rows[1]["assessment_payload"]
+    assert rows[0]["assessment_payload"] == []
     stored = await repository.get_run(run_id)
-    assert stored.assessment == blocked.assessment
-    assert stored.findings == blocked.assessment.findings
+    assert stored.assessment == accepted.assessment
+    assert stored.findings == accepted.assessment.findings
     with pytest.raises(asyncpg.PostgresError, match="immutable analysis records"):
         await postgres.execute(
             "UPDATE human_decisions SET reason = 'rewritten' WHERE id = $1",
@@ -312,7 +321,59 @@ async def test_decision_and_reassessment_roll_back_together(
     )
 
 
-async def test_concurrent_decisions_form_one_serial_lineage(
+@pytest.mark.parametrize("case", ["persisted-insufficient", "stale-snapshot"])
+async def test_insufficient_or_stale_run_rejects_decision_without_write(
+    repository: AnalysisRepository,
+    postgres: asyncpg.Connection,
+    decision_run: tuple[UUID, UUID, UUID, str],
+    case: str,
+) -> None:
+    configured_policy = policy()
+    release_snapshot = snapshot()
+    status = ReleaseStatus.INSUFFICIENT_DATA
+    if case == "stale-snapshot":
+        release_snapshot = replace(
+            release_snapshot,
+            fetch_started_at=NOW - timedelta(minutes=12),
+            fetched_at=NOW - timedelta(minutes=11),
+        )
+        status = ReleaseStatus.NEEDS_DECISION
+    findings = evaluate_checks(release_snapshot, configured_policy, decisions=())
+    policy_version = await postgres.fetchval(
+        "SELECT policy_version FROM analysis_runs WHERE id = $1", decision_run[0]
+    )
+    run_id = await repository.create_run(
+        snapshot=release_snapshot,
+        findings=findings,
+        assessment=ReadinessAssessment(status=status, findings=findings),
+        policy_version=policy_version,
+        source_fetched_at=release_snapshot.fetched_at,
+    )
+    finding_id = await postgres.fetchval(
+        "SELECT id FROM readiness_findings WHERE analysis_run_id = $1", run_id
+    )
+    fingerprint = findings[0].evidence[0].fingerprint
+
+    with pytest.raises(DecisionConflictError):
+        await DecisionService(clock=lambda: NOW, store=repository).record_for_run(
+            run_id=run_id,
+            finding_id=finding_id,
+            fingerprint=fingerprint,
+            kind=DecisionKind.ACCEPTED_RISK,
+            reason="Reviewed",
+            actor="github:7",
+            authorized_repository_id=REPOSITORY_ID,
+        )
+
+    assert (
+        await postgres.fetchval(
+            "SELECT count(*) FROM human_decisions WHERE analysis_run_id = $1", run_id
+        )
+        == 0
+    )
+
+
+async def test_concurrent_decisions_allow_one_atomic_winner(
     database_url: str,
     postgres: asyncpg.Connection,
     decision_run: tuple[UUID, UUID, UUID, str],
@@ -323,7 +384,7 @@ async def test_concurrent_decisions_form_one_serial_lineage(
         AnalysisRepository(database_url, clock=lambda: NOW),
     ]
     try:
-        await asyncio.gather(
+        results = await asyncio.gather(
             DecisionService(clock=lambda: NOW, store=repositories[0]).record_for_run(
                 run_id=run_id,
                 finding_id=finding_id,
@@ -342,6 +403,7 @@ async def test_concurrent_decisions_form_one_serial_lineage(
                 actor="github:8",
                 authorized_repository_id=REPOSITORY_ID,
             ),
+            return_exceptions=True,
         )
     finally:
         await asyncio.gather(*(repository.close() for repository in repositories))
@@ -351,15 +413,15 @@ async def test_concurrent_decisions_form_one_serial_lineage(
         "WHERE analysis_run_id = $1",
         run_id,
     )
-    assert len(rows) == 2
+    assert sum(not isinstance(result, Exception) for result in results) == 1
+    assert sum(isinstance(result, DecisionConflictError) for result in results) == 1
+    assert len(rows) == 1
     roots = [row for row in rows if row["supersedes_decision_id"] is None]
-    children = [row for row in rows if row["supersedes_decision_id"] is not None]
-    assert len(roots) == len(children) == 1
-    assert children[0]["supersedes_decision_id"] == roots[0]["id"]
-    assert sorted(row["decision_sequence"] for row in rows) == [1, 2]
+    assert len(roots) == 1
+    assert rows[0]["decision_sequence"] == 1
 
 
-async def test_repository_retention_cascade_removes_a_two_decision_lineage(
+async def test_repository_retention_cascade_removes_decision(
     repository: AnalysisRepository,
     postgres: asyncpg.Connection,
     decision_run: tuple[UUID, UUID, UUID, str],
@@ -375,15 +437,6 @@ async def test_repository_retention_cascade_removes_a_two_decision_lineage(
         actor="github:7",
         authorized_repository_id=REPOSITORY_ID,
     )
-    await service.record_for_run(
-        run_id=run_id,
-        finding_id=finding_id,
-        fingerprint=fingerprint,
-        kind=DecisionKind.RELEASE_BLOCKER,
-        reason="New evidence requires remediation",
-        actor="github:8",
-        authorized_repository_id=REPOSITORY_ID,
-    )
     latest_id = await postgres.fetchval(
         "SELECT id FROM human_decisions WHERE analysis_run_id = $1 "
         "ORDER BY decision_sequence DESC LIMIT 1",
@@ -391,13 +444,10 @@ async def test_repository_retention_cascade_removes_a_two_decision_lineage(
     )
 
     with pytest.raises(asyncpg.PostgresError, match="immutable analysis records"):
-        await postgres.execute(
-            "DELETE FROM human_decisions WHERE id = $1", latest_id
-        )
+        await postgres.execute("DELETE FROM human_decisions WHERE id = $1", latest_id)
 
     await postgres.execute(
-        "DELETE FROM repository_connections "
-        "WHERE external_repository_id = $1",
+        "DELETE FROM repository_connections WHERE external_repository_id = $1",
         REPOSITORY_ID,
     )
 

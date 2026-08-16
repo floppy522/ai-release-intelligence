@@ -14,6 +14,7 @@ interface ReleaseReportProps {
   assessment: ReadinessAssessment;
   releaseName?: string;
   sourceFetchedAt?: string;
+  repositoryFullName?: string;
   runId?: string;
   actor?: string;
   csrfToken?: string;
@@ -24,6 +25,7 @@ export function ReleaseReport({
   assessment,
   releaseName = "Release 2026.08.10",
   sourceFetchedAt,
+  repositoryFullName,
   runId = "",
   actor,
   csrfToken = "",
@@ -34,7 +36,10 @@ export function ReleaseReport({
   const actionsHeadingId = `${sectionId}-actions`;
   const decisionsHeadingId = `${sectionId}-decisions`;
   const supportingHeadingId = `${sectionId}-supporting`;
-  const decisions = assessment.findings.filter(isDecisionEligible);
+  const decisions =
+    assessment.status === "NEEDS_DECISION"
+      ? assessment.findings.filter(isDecisionEligible)
+      : [];
 
   return (
     <main className="release-report">
@@ -54,7 +59,11 @@ export function ReleaseReport({
         {assessment.findings.length > 0 ? (
           <div className="finding-list">
             {assessment.findings.map((finding) => (
-              <FindingCard key={findingKey(finding)} finding={finding} />
+              <FindingCard
+                key={findingKey(finding)}
+                finding={finding}
+                repositoryFullName={repositoryFullName}
+              />
             ))}
           </div>
         ) : (
@@ -108,22 +117,19 @@ export function ReleaseReport({
 
 function isDecisionEligible(finding: ReadinessFinding): finding is DecisionFinding {
   if (
-    finding.rule_id !== "checks.advisory_requires_decision" ||
+    finding.decision_eligible !== true ||
     finding.severity !== "DECISION_REQUIRED" ||
     !("finding_id" in finding) ||
     typeof finding.finding_id !== "string" ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
       finding.finding_id,
     ) ||
-    finding.evidence.length !== 1
+    typeof finding.decision_fingerprint !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/.test(finding.decision_fingerprint)
   ) {
     return false;
   }
-  const evidence = finding.evidence[0];
-  return (
-    evidence?.source_type === "github_check_run" &&
-    /^sha256:[0-9a-f]{64}$/.test(evidence.fingerprint)
-  );
+  return true;
 }
 
 function statusLabel(status: ReleaseStatus): string {

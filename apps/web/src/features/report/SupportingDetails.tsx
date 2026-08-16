@@ -1,5 +1,4 @@
 import type { ReadinessFinding, ReleaseStatus } from "../../api/types";
-import { canonicalEvidenceUrl } from "./FindingCard";
 
 interface SupportingDetailsProps {
   findings: readonly ReadinessFinding[];
@@ -28,16 +27,9 @@ export function SupportingDetails({
                 </p>
                 <ul>
                   {finding.evidence.map((evidence, index) => {
-                    const url = canonicalEvidenceUrl(evidence.url);
                     return (
                       <li key={`${evidence.evidence_id}:${evidence.fingerprint}`}>
-                        {url ? (
-                          <a href={url} target="_blank" rel="noreferrer">
-                            View evidence {index + 1}
-                          </a>
-                        ) : (
-                          <span>Evidence link unavailable</span>
-                        )}
+                        <span>Evidence {index + 1}</span>
                         <span className="supporting-details__source">
                           {evidence.source_type} {evidence.source_id}
                         </span>

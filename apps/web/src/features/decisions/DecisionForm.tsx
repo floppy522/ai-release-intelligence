@@ -54,7 +54,7 @@ export function DecisionForm({
         runId,
         {
           finding_id: finding.finding_id,
-          fingerprint: evidence.fingerprint,
+          fingerprint: finding.decision_fingerprint,
           decision: kind,
           reason: canonicalReason,
         },
@@ -86,7 +86,7 @@ export function DecisionForm({
         </div>
         <div>
           <dt>Fingerprint</dt>
-          <dd>{evidence?.fingerprint ?? "Unavailable"}</dd>
+          <dd>{finding.decision_fingerprint}</dd>
         </div>
       </dl>
       <label>

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 
 from release_intelligence.domain.models import (
     EvidenceRef,
@@ -33,12 +34,16 @@ from release_intelligence.domain.rules.operations import (
 from release_intelligence.domain.rules.scope import ScopeEvidenceError, evaluate_scope
 
 MAX_SNAPSHOT_AGE = timedelta(minutes=10)
-_SAFE_CODE = re.compile(r"^[a-z][a-z0-9_.:-]{0,254}$")
+_SAFE_CODE = re.compile(r"^[a-z][a-z0-9_.:-]{0,238}$")
+_SAFE_REPOSITORY = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?/"
+    r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?$"
+)
 
 
 def assess(
     snapshot: ReleaseSnapshot,
-    policy: ReleasePolicy | None,
+    policy: ReleasePolicy,
     decisions: Iterable[CheckDecision],
     *,
     now: datetime,
@@ -48,23 +53,15 @@ def assess(
     if snapshot.snapshot_version is SnapshotVersion.LEGACY:
         if _is_trusted_legacy_fixture(snapshot):
             return assess_release(snapshot)
-        return _assessment(ReleaseStatus.INSUFFICIENT_DATA, ())
+        codes = _snapshot_error_codes(snapshot, now)
+        return _assessment(
+            ReleaseStatus.INSUFFICIENT_DATA,
+            _ordered_findings(_insufficiency_findings(snapshot, codes)),
+        )
 
     insufficiency_codes = set(_snapshot_error_codes(snapshot, now))
-    if policy is None:
-        if (
-            insufficiency_codes
-            or snapshot.items
-            or snapshot.links
-            or snapshot.pull_requests
-            or snapshot.checks
-            or snapshot.comparisons
-        ):
-            return _assessment(ReleaseStatus.INSUFFICIENT_DATA, ())
-        return _assessment(ReleaseStatus.READY, ())
     if not isinstance(policy, ReleasePolicy):
-        insufficiency_codes.add("policy.missing")
-        return _assessment(ReleaseStatus.INSUFFICIENT_DATA, ())
+        raise TypeError("configured release policy is required")
 
     try:
         current_decisions = tuple(decisions)
@@ -107,6 +104,7 @@ def assess(
             findings.extend(error.findings)
             insufficiency_codes.update(_safe_codes(error.codes))
 
+    findings.extend(_insufficiency_findings(snapshot, insufficiency_codes))
     ordered = _ordered_findings(findings)
     if insufficiency_codes:
         status = ReleaseStatus.INSUFFICIENT_DATA
@@ -119,6 +117,23 @@ def assess(
     else:
         status = ReleaseStatus.READY
     return _assessment(status, ordered)
+
+
+def refresh_snapshot_freshness(
+    assessment: ReadinessAssessment,
+    snapshot: ReleaseSnapshot,
+    *,
+    now: datetime,
+) -> ReadinessAssessment:
+    """Fail a stored result closed when its immutable source window is no longer valid."""
+
+    codes = _snapshot_error_codes(snapshot, now)
+    if not codes:
+        return assessment
+    findings = _ordered_findings(
+        (*assessment.findings, *_insufficiency_findings(snapshot, codes))
+    )
+    return _assessment(ReleaseStatus.INSUFFICIENT_DATA, findings)
 
 
 def assess_release(snapshot: ReleaseSnapshot) -> ReadinessAssessment:
@@ -215,6 +230,35 @@ def _safe_codes(codes: Iterable[object]) -> tuple[str, ...]:
         else:
             safe.add("evidence.invalid_error_code")
     return tuple(sorted(safe))
+
+
+def _insufficiency_findings(
+    snapshot: ReleaseSnapshot, codes: Iterable[object]
+) -> tuple[ReadinessFinding, ...]:
+    return tuple(_insufficiency_finding(snapshot, code) for code in _safe_codes(codes))
+
+
+def _insufficiency_finding(snapshot: ReleaseSnapshot, code: str) -> ReadinessFinding:
+    digest = sha256(code.encode("ascii")).hexdigest()
+    repository = snapshot.repository_full_name
+    if _SAFE_REPOSITORY.fullmatch(repository) and snapshot.milestone_number > 0:
+        url = f"https://github.com/{repository}/milestone/{snapshot.milestone_number}"
+    else:
+        url = "https://github.com"
+    evidence = EvidenceRef(
+        evidence_id=f"assessment-evidence-{digest}",
+        source_type="assessment_evidence",
+        source_id=code,
+        url=url,
+        fingerprint=f"sha256:{digest}",
+    )
+    return ReadinessFinding(
+        rule_id=f"evidence.{code}",
+        severity="INSUFFICIENT_DATA",
+        summary=f"Required release evidence is unavailable ({code})",
+        required_action="Refresh the analysis after all required evidence is available",
+        evidence=(evidence,),
+    )
 
 
 def _ordered_findings(

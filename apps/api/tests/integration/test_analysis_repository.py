@@ -154,9 +154,7 @@ async def test_create_run_persists_complete_analysis_atomically(
     assert await postgres.fetchval("SELECT count(*) FROM analysis_runs") == 1
     assert await postgres.fetchval("SELECT count(*) FROM release_snapshots") == 1
     assert await postgres.fetchval("SELECT count(*) FROM readiness_findings") == 1
-    assert (
-        await postgres.fetchval("SELECT github_milestone_number FROM releases") == 7
-    )
+    assert await postgres.fetchval("SELECT github_milestone_number FROM releases") == 7
     completion = await postgres.fetchrow(
         "SELECT started_at, completed_at, source_fetched_at FROM analysis_runs"
     )
@@ -233,9 +231,12 @@ async def test_late_finding_failure_rolls_back_snapshot_and_records_failed_audit
             "DROP FUNCTION IF EXISTS reject_test_finding_insert();"
         )
 
-    assert await postgres.fetchval(
-        "SELECT count(*) FROM analysis_runs WHERE state = 'FAILED'"
-    ) == 1
+    assert (
+        await postgres.fetchval(
+            "SELECT count(*) FROM analysis_runs WHERE state = 'FAILED'"
+        )
+        == 1
+    )
     assert await postgres.fetchval("SELECT count(*) FROM analysis_runs") == 1
     assert await postgres.fetchval("SELECT count(*) FROM release_snapshots") == 0
     assert await postgres.fetchval("SELECT count(*) FROM readiness_findings") == 0
@@ -279,15 +280,44 @@ async def test_get_run_retrieves_all_persisted_analysis_audit_fields(
     assert stored.id == run_id
     assert stored.snapshot == fixture_run["snapshot"]
     assert stored.snapshot.milestone_number == 7
-    assert stored.snapshot.fetch_started_at == datetime(
-        2026, 8, 7, 14, 29, tzinfo=UTC
-    )
+    assert stored.snapshot.fetch_started_at == datetime(2026, 8, 7, 14, 29, tzinfo=UTC)
     assert stored.snapshot.candidate_ref == "release/2026-08-10"
     assert stored.snapshot.candidate_sha == "4" * 40
     assert stored.findings == fixture_run["findings"]
     assert stored.assessment == fixture_run["assessment"]
     assert stored.policy_version == "2026.08.1"
     assert stored.source_fetched_at == datetime(2026, 8, 7, 14, 30, tzinfo=UTC)
+    assert len(stored.finding_metadata) == 1
+    assert stored.finding_metadata[0].finding == fixture_run["findings"][0]
+    assert stored.finding_metadata[0].decision_eligible is False
+    assert isinstance(stored.finding_metadata[0].finding_id, UUID)
+
+
+async def test_insufficiency_reason_round_trips_with_business_finding(
+    repository: AnalysisRepository,
+    fixture_run: CreateRunArguments,
+) -> None:
+    reason = ReadinessFinding(
+        rule_id="evidence.snapshot.stale",
+        severity="INSUFFICIENT_DATA",
+        summary="Required release evidence is unavailable (snapshot.stale)",
+        required_action="Refresh the analysis after all required evidence is available",
+        evidence=fixture_run["findings"][0].evidence,
+    )
+    findings = (*fixture_run["findings"], reason)
+    values: CreateRunArguments = {
+        **fixture_run,
+        "findings": findings,
+        "assessment": ReadinessAssessment(
+            status=ReleaseStatus.INSUFFICIENT_DATA,
+            findings=findings,
+        ),
+    }
+
+    stored = await repository.get_run(await repository.create_run(**values))
+
+    assert stored.assessment.status is ReleaseStatus.INSUFFICIENT_DATA
+    assert stored.findings == findings
 
 
 async def test_incompatible_payload_reports_relational_repository_identity(
@@ -328,7 +358,9 @@ async def test_create_run_records_distinct_clocked_start_and_completion_times(
     started_at = datetime(2026, 8, 7, 15, 0, tzinfo=UTC)
     completed_at = datetime(2026, 8, 7, 15, 1, tzinfo=UTC)
     clock_values = iter((started_at, completed_at))
-    clocked_repository = AnalysisRepository(database_url, clock=lambda: next(clock_values))
+    clocked_repository = AnalysisRepository(
+        database_url, clock=lambda: next(clock_values)
+    )
     try:
         await clocked_repository.create_run(**fixture_run)
     finally:

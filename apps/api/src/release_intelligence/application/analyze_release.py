@@ -64,6 +64,10 @@ class MissingCandidateRef(Exception):
     """The requested release-candidate branch does not exist."""
 
 
+class MissingReleasePolicy(Exception):
+    """No validated configured policy exists for a production analysis."""
+
+
 class ReleaseLoader(Protocol):
     async def load(self, request: AnalysisRequest) -> ReleaseSnapshot: ...
 
@@ -93,15 +97,13 @@ class AnalysisService:
             if self._policy_repository is not None
             else None
         )
-        policy = policy_record.policy if policy_record is not None else None
+        if policy_record is None:
+            raise MissingReleasePolicy()
+        policy = policy_record.policy
         configured_request = replace(
             request,
-            previous_milestone_number=(
-                policy.previous_milestone_number if policy is not None else None
-            ),
-            previous_release_branch=(
-                policy.previous_release_branch if policy is not None else None
-            ),
+            previous_milestone_number=policy.previous_milestone_number,
+            previous_release_branch=policy.previous_release_branch,
         )
         bootstrap_started_at = self._now()
         try:
@@ -129,11 +131,7 @@ class AnalysisService:
                 ),
             )
         now = self._now()
-        policy_version = (
-            f"configuration:{policy_record.version}"
-            if policy_record is not None
-            else "default-v1"
-        )
+        policy_version = f"configuration:{policy_record.version}"
         assessment = assess(snapshot, policy=policy, decisions=(), now=now)
         source_fetched_at = snapshot.fetched_at
         if source_fetched_at is None:
@@ -515,7 +513,7 @@ def assess_fixture_release() -> ReadinessAssessment:
 
 def assess(
     snapshot: ReleaseSnapshot,
-    policy: ReleasePolicy | None,
+    policy: ReleasePolicy,
     decisions: Iterable[CheckDecision],
     *,
     now: datetime,

@@ -25,6 +25,14 @@ class IncompatibleSnapshotError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class StoredFindingMetadata:
+    finding_id: UUID
+    finding: ReadinessFinding
+    decision_eligible: bool = False
+    decision_fingerprint: str | None = None
+
+
+@dataclass(frozen=True)
 class StoredAnalysisRun:
     id: UUID
     snapshot: ReleaseSnapshot
@@ -32,6 +40,7 @@ class StoredAnalysisRun:
     assessment: ReadinessAssessment
     policy_version: str
     source_fetched_at: datetime
+    finding_metadata: tuple[StoredFindingMetadata, ...] = ()
 
 
 class AnalysisRepositoryPort(Protocol):

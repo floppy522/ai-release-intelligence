@@ -198,7 +198,20 @@ class FakeManagedPolicyRepository:
 
     async def get_latest(self, repository_id: str) -> PolicyRecord | None:
         self.requested_repository_ids.append(repository_id)
-        return None
+        return PolicyRecord(
+            repository_id=repository_id,
+            version=1,
+            policy=ReleasePolicy(
+                main_branch="main",
+                candidate_branch="release/2026-08-10",
+                milestone_number=7,
+                code_change_label="code-change",
+                release_ops_label="release-ops",
+                blocker_label="release-blocker",
+                check_categories={},
+            ),
+            created_at=datetime(2026, 8, 7, 16, 0, tzinfo=UTC),
+        )
 
     async def create_version(
         self,
@@ -335,7 +348,7 @@ async def test_oauth_state_is_bound_to_the_browser_that_started_login(
     assert legitimate.status_code == 200
     assert replay.status_code == 400
     assert oauth.exchanged_codes == ["legitimate-code"]
-    assert "oauth_binding=\"\"" in legitimate.headers["set-cookie"]
+    assert 'oauth_binding=""' in legitimate.headers["set-cookie"]
 
 
 async def test_callback_encrypts_long_lived_credential_and_sets_opaque_secure_session(
@@ -558,9 +571,12 @@ async def test_production_wiring_persists_token_rate_limit_without_exposing_toke
         policy_repository_factory=lambda _url: policy_repository,
     )
 
-    async with app.router.lifespan_context(app), httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="https://testserver"
-    ) as client:
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="https://testserver"
+        ) as client,
+    ):
         csrf_token, _ = await _login(client)
         store.repository_access[("github:7", "987654")] = AuthorizedRepository(
             repository_id="987654",

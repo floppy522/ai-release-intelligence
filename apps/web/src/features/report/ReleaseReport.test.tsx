@@ -26,6 +26,8 @@ const DECISION = {
   finding_id: "20000000-0000-0000-0000-000000000002",
   rule_id: "checks.advisory_requires_decision",
   severity: "DECISION_REQUIRED",
+  decision_eligible: true,
+  decision_fingerprint: `sha256:${"2".repeat(64)}`,
   summary: "Advisory check security requires a human decision",
   required_action: "Accept the risk or mark security as a release blocker",
   evidence: [
@@ -49,6 +51,7 @@ it("orders verdict, attention, actions, decisions, then supporting details", () 
     <ReleaseReport
       assessment={NOT_READY_ASSESSMENT}
       sourceFetchedAt="2026-08-07T14:30:00Z"
+      repositoryFullName="example/release-demo"
     />,
   );
 
@@ -71,7 +74,10 @@ it("orders verdict, attention, actions, decisions, then supporting details", () 
 
 it("gives every non-pass finding one primary action and one evidence link", () => {
   renderWithQueryClient(
-    <ReleaseReport assessment={NOT_READY_ASSESSMENT} />,
+    <ReleaseReport
+      assessment={NOT_READY_ASSESSMENT}
+      repositoryFullName="example/release-demo"
+    />,
   );
 
   const attention = screen.getByLabelText("What requires attention");
@@ -81,6 +87,7 @@ it("gives every non-pass finding one primary action and one evidence link", () =
     1,
   );
   expect(screen.getAllByText(BLOCKER.required_action)).toHaveLength(1);
+  expect(screen.getAllByRole("link")).toHaveLength(1);
 });
 
 it("uses a native disclosure for supporting evidence", () => {
@@ -105,6 +112,7 @@ it("renders decision controls only for eligible current check fingerprints", () 
       runId="10000000-0000-0000-0000-000000000001"
       actor="octocat"
       csrfToken="csrf-token"
+      repositoryFullName="example/release-demo"
     />,
   );
 
@@ -126,6 +134,45 @@ it("never offers a decision form for a release blocker decision", () => {
 
   expect(screen.queryByRole("button", { name: "Accept risk" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Block release" })).not.toBeInTheDocument();
+});
+
+it("never offers a decision form when the assessment is insufficient", () => {
+  renderWithQueryClient(
+    <ReleaseReport
+      assessment={{ status: "INSUFFICIENT_DATA", findings: [DECISION] }}
+      runId="10000000-0000-0000-0000-000000000001"
+      csrfToken="csrf-token"
+      repositoryFullName="example/release-demo"
+    />,
+  );
+
+  expect(screen.queryByRole("button", { name: "Accept risk" })).toBeNull();
+});
+
+it("renders safe insufficiency codes beside carried business findings", () => {
+  const reason = {
+    rule_id: "evidence.snapshot.stale",
+    severity: "INSUFFICIENT_DATA",
+    summary: "Required release evidence is unavailable (snapshot.stale)",
+    required_action: "Refresh the analysis after all required evidence is available",
+    evidence: [
+      {
+        evidence_id: "assessment-evidence-stale",
+        source_type: "assessment_evidence",
+        source_id: "snapshot.stale",
+        url: "https://github.com/example/release-demo/milestone/7",
+        fingerprint: `sha256:${"7".repeat(64)}`,
+      },
+    ],
+  } as const;
+  renderWithQueryClient(
+    <ReleaseReport
+      assessment={{ status: "INSUFFICIENT_DATA", findings: [BLOCKER, reason] }}
+      repositoryFullName="example/release-demo"
+    />,
+  );
+
+  expect(screen.getAllByText(/snapshot\.stale/).length).toBeGreaterThan(0);
 });
 
 it("handles all statuses and empty sections without a false clean claim", () => {
@@ -164,6 +211,29 @@ it("does not render unsafe evidence URLs or untrusted values as markup", () => {
   expect(container.querySelector("img")).toBeNull();
   expect(screen.queryByRole("link", { name: "Open evidence" })).not.toBeInTheDocument();
   expect(screen.getAllByText("Evidence link unavailable").length).toBeGreaterThan(0);
+});
+
+it.each([
+  "https://other/release-demo/issues/142",
+  "https://github.com/example/other/issues/142",
+  "https://user:pass@github.com/example/release-demo/issues/142",
+  "https://github.com:443/example/release-demo/issues/142",
+  "https://github.com/example/release-demo/issues/142?token=secret",
+  "https://github.com/example/release-demo/issues/142#fragment",
+  "https://github.com/example/release-demo/issues/142/extra",
+  "https://github.com/example/release-demo/pull/142",
+])("withholds repository- or resource-invalid evidence URL %s", (url) => {
+  renderWithQueryClient(
+    <ReleaseReport
+      assessment={{
+        status: "NOT_READY",
+        findings: [{ ...BLOCKER, evidence: [{ ...BLOCKER.evidence[0], url }] }],
+      }}
+      repositoryFullName="example/release-demo"
+    />,
+  );
+
+  expect(screen.queryByRole("link", { name: "Open evidence" })).toBeNull();
 });
 
 it("keeps generated ARIA IDs unique with multiple decision forms", () => {

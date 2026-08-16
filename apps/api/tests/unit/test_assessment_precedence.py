@@ -7,12 +7,17 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from release_intelligence.domain.assessment import MAX_SNAPSHOT_AGE, assess
+from release_intelligence.domain.assessment import (
+    MAX_SNAPSHOT_AGE,
+    assess,
+    refresh_snapshot_freshness,
+)
 from release_intelligence.domain.models import (
     EvidenceRef,
     ReleaseSnapshot,
     ReleaseStatus,
     SnapshotVersion,
+    SourceError,
 )
 from release_intelligence.domain.policy import CheckCategory, ReleasePolicy
 from release_intelligence.domain.rules.checks import CheckFingerprint
@@ -211,10 +216,24 @@ def test_naive_now_cannot_be_ready() -> None:
     )
 
 
-def test_missing_policy_cannot_skip_mandatory_rules() -> None:
-    assert assess(snapshot(), None, (), now=NOW).status is (
-        ReleaseStatus.INSUFFICIENT_DATA
+def test_policy_dependent_assessment_rejects_missing_policy() -> None:
+    with pytest.raises(TypeError, match="configured release policy is required"):
+        assess(snapshot(), None, (), now=NOW)  # type: ignore[arg-type]
+
+
+def test_policy_independent_refresh_preserves_stored_status_until_stale() -> None:
+    stored = assess(snapshot(has_blocker=True), policy(), (), now=NOW)
+
+    assert refresh_snapshot_freshness(stored, snapshot(), now=NOW) == stored
+    stale = refresh_snapshot_freshness(
+        stored, snapshot(), now=NOW + MAX_SNAPSHOT_AGE + timedelta(microseconds=1)
     )
+
+    assert stale.status is ReleaseStatus.INSUFFICIENT_DATA
+    assert {finding.rule_id for finding in stale.findings} >= {
+        "checks.blocking_not_successful",
+        "evidence.snapshot.stale",
+    }
 
 
 def test_exact_current_check_fingerprint_is_the_decision_boundary() -> None:
@@ -330,7 +349,40 @@ def test_typed_evidence_errors_preserve_independently_proven_findings() -> None:
         finding.rule_id == "scope.code_change_requires_pr"
         for finding in result.findings
     )
+    assert any(
+        finding.rule_id.startswith("evidence.")
+        and finding.severity == "INSUFFICIENT_DATA"
+        for finding in result.findings
+    )
     assert "https://" not in " ".join(finding.summary for finding in result.findings)
+
+
+def test_insufficiency_reasons_are_safe_ordered_and_idempotent() -> None:
+    candidate = replace(
+        snapshot(complete=False),
+        source_errors=(
+            # Raw source messages must never enter assessment findings.
+            SourceError("github.rate_limited", "token=secret raw body"),
+            SourceError("github.rate_limited", "different unsafe body"),
+        ),
+    )
+
+    first = assess(candidate, policy(), (), now=NOW)
+    second = assess(candidate, policy(), (), now=NOW)
+    reasons = tuple(
+        finding for finding in first.findings if finding.rule_id.startswith("evidence.")
+    )
+
+    assert first == second
+    assert tuple(finding.rule_id for finding in reasons) == tuple(
+        sorted({finding.rule_id for finding in reasons})
+    )
+    assert {finding.rule_id for finding in reasons} >= {
+        "evidence.snapshot.incomplete",
+        "evidence.snapshot.source_errors",
+    }
+    assert "secret" not in repr(reasons)
+    assert len(reasons) == len(set(reasons))
 
 
 def test_exact_duplicate_findings_are_idempotent() -> None:

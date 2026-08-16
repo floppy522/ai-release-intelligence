@@ -39,6 +39,7 @@ from release_intelligence.ports.policies import PolicyPersistenceError, PolicyRe
 from release_intelligence.ports.repositories import (
     IncompatibleSnapshotError,
     StoredAnalysisRun,
+    StoredFindingMetadata,
 )
 from release_intelligence.security.crypto import token_digest
 
@@ -76,7 +77,7 @@ def snapshot(
         complete=complete,
         source_errors=source_errors,
         candidate_ref="release/2026-08-10",
-        candidate_sha=(candidate_sha or "candidate-sha") if complete else "",
+        candidate_sha=(candidate_sha or "a" * 40) if complete else "",
         checks=checks,
     )
 
@@ -136,6 +137,23 @@ class MemoryAnalysisRepository:
             self.write_failed = True
             raise SQLAlchemyError("database unavailable")
         run_id = uuid4()
+        finding_metadata = tuple(
+            StoredFindingMetadata(
+                finding_id=uuid4(),
+                finding=finding,
+                decision_eligible=(
+                    values["assessment"].status.value == "NEEDS_DECISION"
+                    and finding.decision_allowed
+                ),
+                decision_fingerprint=(
+                    finding.evidence[0].fingerprint
+                    if values["assessment"].status.value == "NEEDS_DECISION"
+                    and finding.decision_allowed
+                    else None
+                ),
+            )
+            for finding in values["findings"]
+        )
         self.runs[run_id] = StoredAnalysisRun(
             id=run_id,
             snapshot=values["snapshot"],
@@ -143,6 +161,7 @@ class MemoryAnalysisRepository:
             assessment=values["assessment"],
             policy_version=values["policy_version"],
             source_fetched_at=values["source_fetched_at"],
+            finding_metadata=finding_metadata,
         )
         return run_id
 
@@ -180,10 +199,30 @@ class FakePolicyStore:
         raise AssertionError("analysis must not create policy versions")
 
 
+def default_policy_record() -> PolicyRecord:
+    return PolicyRecord(
+        repository_id=REPOSITORY_ID,
+        version=1,
+        policy=ReleasePolicy(
+            main_branch="main",
+            candidate_branch="release/2026-08-10",
+            milestone_number=7,
+            code_change_label="code-change",
+            release_ops_label="release-ops",
+            blocker_label="release-blocker",
+            check_categories={},
+        ),
+        created_at=NOW,
+    )
+
+
+_CONFIGURED_POLICY = object()
+
+
 def service(
     loader: FakeLoader,
     repository: MemoryAnalysisRepository,
-    policy_repository: FakePolicyStore | None = None,
+    policy_repository: FakePolicyStore | None | object = _CONFIGURED_POLICY,
 ) -> AnalysisService:
     async def loader_factory(request: AnalysisRequest) -> FakeLoader:
         del request
@@ -192,7 +231,11 @@ def service(
     return AnalysisService(
         loader_factory=loader_factory,
         repository=repository,
-        policy_repository=policy_repository,
+        policy_repository=(
+            FakePolicyStore(default_policy_record())
+            if policy_repository is _CONFIGURED_POLICY
+            else policy_repository
+        ),  # type: ignore[arg-type]
         clock=lambda: NOW,
     )
 
@@ -242,9 +285,30 @@ async def test_post_analysis_returns_persisted_run_and_get_retrieves_it(
     assert UUID(response.json()["run_id"])
     assert retrieved.status_code == 200
     assert retrieved.json()["status"] == "READY"
-    assert retrieved.json()["snapshot"]["candidate_sha"] == "candidate-sha"
+    assert retrieved.json()["snapshot"]["candidate_sha"] == "a" * 40
     assert loader.requests[0].repository.owner == "example"
     assert loader.requests[0].installation_id == 123
+
+
+async def test_production_analysis_requires_a_configured_policy(
+    store: FakeAuthStore,
+) -> None:
+    loader = FakeLoader(snapshot())
+    async with await request_client(
+        service(loader, MemoryAnalysisRepository(), FakePolicyStore(None)), store
+    ) as client:
+        response = await client.post(
+            "/api/analyses",
+            json={
+                "repository_id": REPOSITORY_ID,
+                "milestone_number": 7,
+                "candidate_ref": "release/2026-08-10",
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Release policy is required"}
+    assert loader.requests == []
 
 
 async def test_analysis_uses_current_configured_policy_for_decision_eligible_run() -> (
@@ -301,6 +365,20 @@ async def test_analysis_uses_current_configured_policy_for_decision_eligible_run
     assert [finding.rule_id for finding in stored.findings] == [
         "checks.advisory_requires_decision"
     ]
+    async with await request_client(analysis_service, FakeAuthStore()) as client:
+        response = await client.get(f"/api/analyses/{run_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["repository_id"] == REPOSITORY_ID
+    assert payload["repository_full_name"] == "example/release-intelligence"
+    assert payload["source_fetched_at"] == NOW.isoformat().replace("+00:00", "Z")
+    assert payload["release_name"] == "Milestone 7"
+    assert len(payload["findings"]) == 1
+    finding = payload["findings"][0]
+    assert UUID(finding["finding_id"])
+    assert finding["decision_eligible"] is True
+    assert finding["decision_fingerprint"] == finding["evidence"][0]["fingerprint"]
 
 
 async def test_analysis_loads_policy_selected_previous_release_before_snapshot() -> (
@@ -389,6 +467,10 @@ async def test_partial_and_rate_limited_snapshots_are_persisted_insufficient(
 
     assert created.status_code == 202
     assert retrieved.json()["status"] == "INSUFFICIENT_DATA"
+    assert {finding["rule_id"] for finding in retrieved.json()["findings"]} >= {
+        "evidence.snapshot.incomplete",
+        "evidence.snapshot.source_errors",
+    }
     error = retrieved.json()["snapshot"]["source_errors"][0]
     assert error["code"] == "github.rate_limited"
     assert error["reset_at"] == reset_at.isoformat().replace("+00:00", "Z")
@@ -511,6 +593,7 @@ async def test_installation_token_availability_is_persisted_insufficient(
     analysis_service = AnalysisService(
         loader_factory=failing_factory,
         repository=repository,
+        policy_repository=FakePolicyStore(default_policy_record()),
         clock=lambda: NOW,
     )
     async with await request_client(analysis_service, store) as client:
@@ -600,6 +683,11 @@ async def test_get_returns_effective_insufficient_when_stored_ready_is_stale(
 
     assert retrieved.status_code == 200
     assert retrieved.json()["status"] == "INSUFFICIENT_DATA"
+    assert any(
+        finding["rule_id"] == "evidence.snapshot.stale"
+        and finding["decision_eligible"] is False
+        for finding in retrieved.json()["findings"]
+    )
     assert repository.runs[stored.id].assessment.status.value == "READY"
 
 

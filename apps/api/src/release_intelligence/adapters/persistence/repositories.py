@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -37,6 +38,7 @@ from release_intelligence.application.decisions import (
     DecisionResult,
     HumanDecision,
 )
+from release_intelligence.domain.assessment import assess
 from release_intelligence.domain.models import (
     EvidenceRef,
     ReadinessAssessment,
@@ -45,18 +47,49 @@ from release_intelligence.domain.models import (
     ReleaseStatus,
 )
 from release_intelligence.domain.policy import PolicyValidationError, ReleasePolicy
-from release_intelligence.domain.rules.checks import (
-    CheckDecision,
-    CheckEvidenceError,
-    evaluate_checks,
-)
+from release_intelligence.domain.rules.checks import CheckDecision
 from release_intelligence.ports.repositories import (
     ImmutableSnapshotError,
     IncompatibleSnapshotError,
     StoredAnalysisRun,
+    StoredFindingMetadata,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def reassess_stored_decision(
+    *,
+    snapshot: ReleaseSnapshot,
+    policy: ReleasePolicy,
+    active_decisions: tuple[HumanDecision, ...],
+    decision: HumanDecision,
+    persisted_status: ReleaseStatus,
+) -> tuple[ReadinessAssessment, ReadinessAssessment]:
+    """Reassess one immutable snapshot without source access or partial rule replay."""
+
+    if persisted_status is not ReleaseStatus.NEEDS_DECISION:
+        raise DecisionConflictError()
+    current = assess(
+        snapshot,
+        policy,
+        cast(Iterable[CheckDecision], active_decisions),
+        now=decision.decided_at,
+    )
+    if current.status is not ReleaseStatus.NEEDS_DECISION:
+        raise DecisionConflictError()
+    reassessment_decisions = tuple(
+        active
+        for active in active_decisions
+        if active.fingerprint != decision.fingerprint
+    ) + (decision,)
+    reassessed = assess(
+        snapshot,
+        policy,
+        cast(Iterable[CheckDecision], reassessment_decisions),
+        now=decision.decided_at,
+    )
+    return current, reassessed
 
 
 class AnalysisRepository:
@@ -67,7 +100,9 @@ class AnalysisRepository:
         database_url: str,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        self._engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
+        self._engine: AsyncEngine = create_async_engine(
+            database_url, pool_pre_ping=True
+        )
         self._sessions = async_sessionmaker(self._engine, expire_on_commit=False)
         self._clock = clock or (lambda: datetime.now(UTC))
 
@@ -137,7 +172,9 @@ class AnalysisRepository:
                 return run.id
         except SQLAlchemyError:
             try:
-                await self._record_failed_run(snapshot, policy_version, source_fetched_at)
+                await self._record_failed_run(
+                    snapshot, policy_version, source_fetched_at
+                )
             except Exception:  # noqa: BLE001 - never mask the original database error
                 # Preserve the original write failure; the audit attempt is best-effort
                 # when the database itself is unavailable.
@@ -184,15 +221,15 @@ class AnalysisRepository:
                 raise IncompatibleSnapshotError(
                     run.release.repository.external_repository_id
                 ) from None
+        metadata = self._finding_metadata(run, findings, assessment_status)
         return StoredAnalysisRun(
             id=run.id,
             snapshot=snapshot,
             findings=findings,
-            assessment=ReadinessAssessment(
-                status=assessment_status, findings=findings
-            ),
+            assessment=ReadinessAssessment(status=assessment_status, findings=findings),
             policy_version=run.policy_version,
             source_fetched_at=run.source_fetched_at,
+            finding_metadata=metadata,
         )
 
     async def replace_snapshot(self, run_id: UUID, snapshot: ReleaseSnapshot) -> None:
@@ -253,12 +290,6 @@ class AnalysisRepository:
                     repository_id=authorized_repository_id,
                 )
                 policy = ReleasePolicy.model_validate(policy_row.policy_payload)
-                undecided_findings = evaluate_checks(snapshot, policy, decisions=())
-                if not self._decision_eligible(
-                    target_row, undecided_findings, decision.fingerprint
-                ):
-                    raise DecisionFindingNotFoundError()
-
                 active_decisions = self._active_decisions(run.decisions)
                 target_active = tuple(
                     current
@@ -278,30 +309,17 @@ class AnalysisRepository:
                 persisted_decision = replace(
                     decision, supersedes_decision_id=supersedes
                 )
-                reassessment_decisions = tuple(
-                    current
-                    for current in active_decisions
-                    if current.fingerprint != decision.fingerprint
-                ) + (persisted_decision,)
-                check_findings = evaluate_checks(
-                    snapshot,
-                    policy,
-                    decisions=cast(Iterable[CheckDecision], reassessment_decisions),
+                current_assessment, assessment = reassess_stored_decision(
+                    snapshot=snapshot,
+                    policy=policy,
+                    active_decisions=active_decisions,
+                    decision=persisted_decision,
+                    persisted_status=self._persisted_decision_status(run),
                 )
-                preserved_findings = tuple(
-                    self._finding_from_row(finding)
-                    for finding in run.findings
-                    if not finding.rule_id.startswith("checks.")
-                )
-                findings = tuple(
-                    sorted(
-                        (*preserved_findings, *check_findings),
-                        key=self._finding_sort_key,
-                    )
-                )
-                assessment = ReadinessAssessment(
-                    status=self._status_for_findings(findings), findings=findings
-                )
+                if not self._decision_eligible(
+                    target_row, current_assessment.findings, decision.fingerprint
+                ):
+                    raise DecisionFindingNotFoundError()
                 row = HumanDecisionRow(
                     id=persisted_decision.id,
                     analysis_run_id=run_id,
@@ -313,7 +331,7 @@ class AnalysisRepository:
                     actor_id=persisted_decision.actor_id,
                     decision_sequence=decision_sequence,
                     assessment_status=assessment.status.value,
-                    assessment_payload=self._findings_payload(findings),
+                    assessment_payload=self._findings_payload(assessment.findings),
                     decided_at=persisted_decision.decided_at,
                 )
                 session.add(row)
@@ -327,7 +345,6 @@ class AnalysisRepository:
         except IncompatibleSnapshotError:
             raise DecisionConflictError() from None
         except (
-            CheckEvidenceError,
             PolicyValidationError,
             ValidationError,
             TypeError,
@@ -401,7 +418,9 @@ class AnalysisRepository:
     ) -> None:
         started_at = self._clock_now()
         async with self._sessions() as session, session.begin():
-            release = await self._release_for_snapshot(session, snapshot, policy_version)
+            release = await self._release_for_snapshot(
+                session, snapshot, policy_version
+            )
             completed_at = self._clock_now()
             session.add(
                 AnalysisRunRow(
@@ -492,14 +511,59 @@ class AnalysisRepository:
             return False
         if not any(evidence.fingerprint == fingerprint for evidence in row.evidence):
             return False
+        stored_finding = AnalysisRepository._finding_from_row(row)
         return any(
-            finding.rule_id == "checks.advisory_requires_decision"
+            finding == stored_finding
             and finding.requires_decision
             and any(
                 evidence.fingerprint == fingerprint for evidence in finding.evidence
             )
             for finding in current_findings
         )
+
+    @classmethod
+    def _finding_metadata(
+        cls,
+        run: AnalysisRunRow,
+        findings: tuple[ReadinessFinding, ...],
+        status: ReleaseStatus,
+    ) -> tuple[StoredFindingMetadata, ...]:
+        rows_by_finding: dict[ReadinessFinding, list[ReadinessFindingRow]] = {}
+        for row in run.findings:
+            rows_by_finding.setdefault(cls._finding_from_row(row), []).append(row)
+        metadata: list[StoredFindingMetadata] = []
+        for finding in findings:
+            matches = rows_by_finding.get(finding, [])
+            if not matches:
+                continue
+            row = matches.pop(0)
+            fingerprints = tuple(
+                evidence.fingerprint
+                for evidence in finding.evidence
+                if re.fullmatch(r"sha256:[0-9a-f]{64}", evidence.fingerprint)
+            )
+            eligible = (
+                status is ReleaseStatus.NEEDS_DECISION
+                and finding.decision_allowed
+                and finding.rule_id == "checks.advisory_requires_decision"
+                and len(fingerprints) == 1
+            )
+            metadata.append(
+                StoredFindingMetadata(
+                    finding_id=row.id,
+                    finding=finding,
+                    decision_eligible=eligible,
+                    decision_fingerprint=fingerprints[0] if eligible else None,
+                )
+            )
+        return tuple(metadata)
+
+    @staticmethod
+    def _persisted_decision_status(run: AnalysisRunRow) -> ReleaseStatus:
+        if not run.decisions:
+            return ReleaseStatus(AnalysisRepository._assessment_status(run))
+        latest = max(run.decisions, key=lambda row: row.decision_sequence)
+        return ReleaseStatus(latest.assessment_status)
 
     @staticmethod
     def _active_decisions(rows: list[HumanDecisionRow]) -> tuple[HumanDecision, ...]:

@@ -17,17 +17,26 @@ from release_intelligence.api.dependencies import (
     get_clock,
     require_repository_access,
 )
+from release_intelligence.api.schemas import EvidenceResponse
 from release_intelligence.application.analyze_release import (
     AnalysisRequest,
     AnalysisService,
     MissingCandidateRef,
     MissingMilestone,
-    assess,
+    MissingReleasePolicy,
 )
-from release_intelligence.domain.models import ReleaseSnapshot, ReleaseStatus
+from release_intelligence.domain.assessment import refresh_snapshot_freshness
+from release_intelligence.domain.models import (
+    ReadinessFinding,
+    ReleaseSnapshot,
+    ReleaseStatus,
+)
 from release_intelligence.ports.github import GitHubUnauthorized, RepoRef
 from release_intelligence.ports.policies import PolicyPersistenceError
-from release_intelligence.ports.repositories import IncompatibleSnapshotError
+from release_intelligence.ports.repositories import (
+    IncompatibleSnapshotError,
+    StoredFindingMetadata,
+)
 
 router = APIRouter(prefix="/api/analyses", tags=["analyses"])
 
@@ -46,12 +55,25 @@ class AnalysisCreateRequest(BaseModel):
         try:
             date.fromisoformat(self.candidate_ref.removeprefix("release/"))
         except ValueError:
-            raise ValueError("candidate_ref must contain a valid calendar date") from None
+            raise ValueError(
+                "candidate_ref must contain a valid calendar date"
+            ) from None
         return self
 
 
 class AnalysisAccepted(BaseModel):
     run_id: UUID
+
+
+class AnalysisRunFindingResponse(BaseModel):
+    finding_id: UUID | None
+    decision_eligible: bool
+    decision_fingerprint: str | None
+    rule_id: str
+    severity: str
+    summary: str
+    required_action: str
+    evidence: tuple[EvidenceResponse, ...]
 
 
 class AnalysisRunResponse(BaseModel):
@@ -60,14 +82,17 @@ class AnalysisRunResponse(BaseModel):
     run_id: UUID
     status: ReleaseStatus
     snapshot: ReleaseSnapshot
+    release_name: str
+    repository_id: str
+    repository_full_name: str
+    source_fetched_at: datetime
+    findings: tuple[AnalysisRunFindingResponse, ...]
 
 
 def get_analysis_service(request: Request) -> AnalysisService:
     service = getattr(request.app.state, "analysis_service", None)
     if service is None:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "Analysis unavailable"
-        )
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Analysis unavailable")
     return cast(AnalysisService, service)
 
 
@@ -105,6 +130,11 @@ async def create_analysis(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "Candidate branch was not found",
         ) from None
+    except MissingReleasePolicy:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Release policy is required",
+        ) from None
     except GitHubUnauthorized:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "GitHub repository access denied"
@@ -137,23 +167,63 @@ async def get_analysis(
             status_code=status.HTTP_409_CONFLICT,
         )
     except KeyError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Analysis was not found") from None
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "Analysis was not found"
+        ) from None
     except SQLAlchemyError:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Analysis persistence unavailable",
         ) from None
     await _require_run_access(user.id, run.snapshot.repository_id, store)
-    freshness = assess(run.snapshot, policy=None, decisions=(), now=clock())
-    effective_status = (
-        ReleaseStatus.INSUFFICIENT_DATA
-        if freshness.status is ReleaseStatus.INSUFFICIENT_DATA
-        else run.assessment.status
+    freshness = refresh_snapshot_freshness(
+        run.assessment,
+        run.snapshot,
+        now=clock(),
     )
     return AnalysisRunResponse(
         run_id=run.id,
-        status=effective_status,
+        status=freshness.status,
         snapshot=run.snapshot,
+        release_name=run.snapshot.release_name,
+        repository_id=run.snapshot.repository_id,
+        repository_full_name=run.snapshot.repository_full_name,
+        source_fetched_at=run.source_fetched_at,
+        findings=tuple(
+            _finding_response(finding, run.finding_metadata, freshness.status)
+            for finding in freshness.findings
+        ),
+    )
+
+
+def _finding_response(
+    finding: ReadinessFinding,
+    metadata: tuple[StoredFindingMetadata, ...],
+    status_value: ReleaseStatus,
+) -> AnalysisRunFindingResponse:
+    match = next(
+        (item for item in metadata if item.finding == finding),
+        None,
+    )
+    eligible = (
+        match is not None
+        and status_value is ReleaseStatus.NEEDS_DECISION
+        and match.decision_eligible
+    )
+    return AnalysisRunFindingResponse(
+        finding_id=match.finding_id if match is not None else None,
+        decision_eligible=eligible,
+        decision_fingerprint=(
+            match.decision_fingerprint if match is not None and eligible else None
+        ),
+        rule_id=finding.rule_id,
+        severity=finding.severity,
+        summary=finding.summary,
+        required_action=finding.required_action,
+        evidence=tuple(
+            EvidenceResponse.model_validate(evidence, from_attributes=True)
+            for evidence in finding.evidence
+        ),
     )
 
 

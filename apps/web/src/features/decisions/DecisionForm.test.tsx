@@ -12,6 +12,8 @@ vi.mock("../../api/client", async (importOriginal) => ({
 
 const FINDING = {
   finding_id: "20000000-0000-0000-0000-000000000002",
+  decision_eligible: true,
+  decision_fingerprint: `sha256:${"a".repeat(64)}`,
   rule_id: "checks.advisory_requires_decision",
   severity: "DECISION_REQUIRED",
   summary: "Advisory check security is not successful",

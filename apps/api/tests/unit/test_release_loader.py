@@ -14,10 +14,11 @@ from release_intelligence.application.analyze_release import (
     GitHubReleaseLoader,
     MissingCandidateRef,
     MissingMilestone,
-    assess,
 )
+from release_intelligence.domain.assessment import assess, refresh_snapshot_freshness
 from release_intelligence.domain.models import (
     PullRequestComparison,
+    ReadinessAssessment,
     ReleaseStatus,
     SourceError,
 )
@@ -38,6 +39,7 @@ from release_intelligence.ports.github import (
 from release_intelligence.ports.repositories import IncompatibleSnapshotError
 
 NOW = datetime(2026, 8, 7, 14, 30, tzinfo=UTC)
+STORED_READY = ReadinessAssessment(status=ReleaseStatus.READY, findings=())
 REQUEST = AnalysisRequest(
     repository_id="987654",
     repository=RepoRef(owner="example", name="release-intelligence"),
@@ -275,7 +277,7 @@ async def test_partial_github_fetch_cannot_produce_ready() -> None:
     source.fail_at = "checks"
     snapshot = await GitHubReleaseLoader(source, clock=lambda: NOW).load(REQUEST)
 
-    assessment = assess(snapshot, policy=None, decisions=(), now=NOW)
+    assessment = refresh_snapshot_freshness(STORED_READY, snapshot, now=NOW)
 
     assert snapshot.complete is False
     assert snapshot.source_errors[0].code == "github.partial_data"
@@ -478,10 +480,9 @@ async def test_snapshot_older_than_ten_minutes_is_insufficient() -> None:
     source = FakeSource()
     snapshot = await GitHubReleaseLoader(source, clock=lambda: NOW).load(REQUEST)
 
-    assessment = assess(
+    assessment = refresh_snapshot_freshness(
+        STORED_READY,
         snapshot,
-        policy=None,
-        decisions=(),
         now=snapshot.fetched_at + timedelta(minutes=11),
     )
 
@@ -519,7 +520,7 @@ async def test_snapshot_older_than_ten_minutes_is_insufficient() -> None:
 async def test_normalized_snapshot_metadata_contradictions_fail_closed(corrupt) -> None:
     complete = await GitHubReleaseLoader(FakeSource(), clock=lambda: NOW).load(REQUEST)
 
-    assessment = assess(corrupt(complete), policy=None, decisions=(), now=NOW)
+    assessment = refresh_snapshot_freshness(STORED_READY, corrupt(complete), now=NOW)
 
     assert assessment.status is ReleaseStatus.INSUFFICIENT_DATA
 
@@ -579,7 +580,7 @@ def test_repository_wraps_unknown_snapshot_version_with_trusted_identity() -> No
     ],
 )
 def test_legacy_exemption_is_limited_to_the_trusted_fixture_boundary(forged) -> None:
-    result = assess(forged, policy=None, decisions=(), now=NOW)
+    result = assess(forged, policy=None, decisions=(), now=NOW)  # type: ignore[arg-type]
 
     assert result.status is ReleaseStatus.INSUFFICIENT_DATA
 

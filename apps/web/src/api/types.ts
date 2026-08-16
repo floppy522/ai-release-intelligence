@@ -13,6 +13,9 @@ export interface EvidenceRef {
 }
 
 export interface ReadinessFinding {
+  finding_id?: string | null;
+  decision_eligible?: boolean;
+  decision_fingerprint?: string | null;
   rule_id: string;
   severity: string;
   summary: string;
@@ -29,6 +32,18 @@ export type DecisionKind = "ACCEPTED_RISK" | "RELEASE_BLOCKER";
 
 export interface DecisionFinding extends ReadinessFinding {
   finding_id: string;
+  decision_eligible: true;
+  decision_fingerprint: string;
+}
+
+export interface AnalysisRun {
+  run_id: string;
+  status: ReleaseStatus;
+  release_name: string;
+  repository_id: string;
+  repository_full_name: string;
+  source_fetched_at: string;
+  findings: readonly ReadinessFinding[];
 }
 
 export interface DecisionCreatePayload {
