@@ -23,19 +23,31 @@ critical recall = 1.0, risk precision >= 0.95, evidence coverage = 1.0, and
 invalid evidence rate = 0.0. `unsupported_claim_rate` remains `null` until a
 complete human review exists.
 
-Export each validated Task 13 `AIExplanation` with `export_claim_packet`. The
-canonical JSON packet embeds its immutable `ExplanationInput`, validated
-explanation, content-addressed atomic claims, and a hash of the entire packet.
-Every prose-bearing explanation field becomes a claim whose cited finding and
-evidence facts must exactly match the embedded source. The review document must
-carry that exact `packet_hash`, preventing decisions from being reused after
-any source, explanation, claim, or scenario change. Review every claim with the
-schema in `reviews/schema.json`, then run:
+Load the immutable `StoredAnalysisRun` through the authorized analysis repository
+boundary. Export its trusted deterministic artifact with
+`export_stored_assessment(run)` and export the validated Task 13 explanation with
+`export_claim_packet(run=run, explanation=explanation)`. Both exporters reuse
+Task 13's exact allowlisted `build_explanation_input` projection. The trusted
+assessment artifact must be stored and supplied independently of the claims
+artifact; an artifact embedded in or supplied by the claims producer is not a
+provenance boundary.
+
+The canonical claims packet binds the stable analysis-run ID, repository
+identity, snapshot fingerprint, and canonical assessment digest. Every
+prose-bearing explanation field becomes a content-addressed claim whose cited
+finding and evidence facts must exactly match the source. The review document
+must carry the exact `packet_hash`, preventing decisions from being reused after
+any source, explanation, claim, run, repository, or snapshot change. Review every
+claim with the schema in `reviews/schema.json`, then run:
 
 ```bash
 uv run python -m release_intelligence.benchmark.review \
-  --claims ai-claims.json --review claim-review.yaml
+  --claims ai-claims.json \
+  --review claim-review.yaml \
+  --assessment trusted-assessment.json
 ```
 
-Incomplete reviews and any unsupported claim exit non-zero. Missing decisions
-never produce a zero unsupported-claim rate.
+The review CLI independently validates and compares the trusted artifact before
+using review decisions. Omitting `--assessment`, supplying a changed or
+mismatched artifact, incomplete reviews, and any unsupported claim exit
+non-zero. Missing decisions never produce a zero unsupported-claim rate.

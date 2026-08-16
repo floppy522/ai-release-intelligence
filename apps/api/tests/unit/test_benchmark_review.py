@@ -4,11 +4,15 @@ import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
 
-from release_intelligence.application.explanations import ExplanationValidator
+from release_intelligence.application.explanations import (
+    ExplanationValidator,
+    build_explanation_input,
+)
 from release_intelligence.benchmark.review import (
     AtomicClaim,
     ClaimReview,
@@ -16,42 +20,81 @@ from release_intelligence.benchmark.review import (
     ReviewDocument,
     evaluate_review,
     export_claim_packet,
+    export_stored_assessment,
     main,
     stable_claim_id,
+)
+from release_intelligence.domain.models import (
+    EvidenceRef,
+    ReadinessAssessment,
+    ReadinessFinding,
+    ReleaseSnapshot,
+    ReleaseStatus,
+    SnapshotVersion,
 )
 from release_intelligence.ports.ai import (
     AIExplanation,
     ExplanationAction,
-    ExplanationEvidence,
-    ExplanationFinding,
     ExplanationGroup,
-    ExplanationInput,
 )
+from release_intelligence.ports.repositories import (
+    StoredAnalysisRun,
+    StoredFindingMetadata,
+)
+
+NOW = datetime(2026, 8, 16, 12, tzinfo=UTC)
+RUN_ID = UUID("20000000-0000-0000-0000-000000000001")
+FINDING_ID = UUID("10000000-0000-0000-0000-000000000001")
+
+
+def _run() -> StoredAnalysisRun:
+    evidence = EvidenceRef(
+        evidence_id="github-check-101",
+        source_type="github_check_run",
+        source_id="101",
+        url="https://github.com/acme/widgets/runs/101",
+        fingerprint="sha256:" + "1" * 64,
+    )
+    finding = ReadinessFinding(
+        rule_id="checks.blocking_not_successful",
+        severity="BLOCKING",
+        summary="Blocking check failed",
+        required_action="Fix the blocking check",
+        evidence=(evidence,),
+    )
+    snapshot = ReleaseSnapshot(
+        release_name="Release 2026.08.17",
+        issue_number="",
+        milestone_number=7,
+        issue_labels=(),
+        linked_pr_numbers=(),
+        issue_evidence=evidence,
+        snapshot_version=SnapshotVersion.GITHUB_V1,
+        repository_id="77",
+        repository_full_name="acme/widgets",
+        fetch_started_at=NOW,
+        fetched_at=NOW,
+        candidate_ref="release/2026-08-17",
+        candidate_sha="a" * 40,
+    )
+    return StoredAnalysisRun(
+        id=RUN_ID,
+        snapshot=snapshot,
+        findings=(finding,),
+        assessment=ReadinessAssessment(
+            status=ReleaseStatus.NOT_READY, findings=(finding,)
+        ),
+        policy_version="configuration:1",
+        source_fetched_at=NOW,
+        finding_metadata=(
+            StoredFindingMetadata(finding_id=FINDING_ID, finding=finding),
+        ),
+    )
 
 
 def _claims() -> ClaimsDocument:
-    source = ExplanationInput(
-        deterministic_status="NOT_READY",
-        release_name="Release 2026.08.17",
-        source_fetched_at="2026-08-16T12:00:00+00:00",
-        findings=(
-            ExplanationFinding(
-                finding_id="finding-1",
-                rule_id="checks.blocking_not_successful",
-                severity="BLOCKING",
-                summary="Blocking check failed",
-                required_action="Fix the blocking check",
-                evidence=(
-                    ExplanationEvidence(
-                        evidence_id="github-check-101",
-                        source_type="github_check_run",
-                        source_id="101",
-                    ),
-                ),
-            ),
-        ),
-        limitations=("Deterministic readiness remains authoritative.",),
-    )
+    run = _run()
+    source = build_explanation_input(run)
     raw = AIExplanation(
         summary="model prose is replaced",
         groups=(
@@ -59,25 +102,24 @@ def _claims() -> ClaimsDocument:
                 title="blocking check",
                 explanation="blocking check",
                 severity="BLOCKING",
-                finding_ids=("finding-1",),
+                finding_ids=(str(FINDING_ID),),
                 evidence_ids=("github-check-101",),
             ),
         ),
         actions=(
             ExplanationAction(
                 action="Fix the blocking check",
-                finding_ids=("finding-1",),
+                finding_ids=(str(FINDING_ID),),
                 evidence_ids=("github-check-101",),
             ),
         ),
         limitations=source.limitations,
         confidence="LOW",
-        finding_ids=("finding-1",),
+        finding_ids=(str(FINDING_ID),),
         evidence_ids=("github-check-101",),
     )
     return export_claim_packet(
-        scenario_id="critical-check",
-        source=source,
+        run=run,
         explanation=ExplanationValidator(source).validate(raw),
     )
 
@@ -94,6 +136,12 @@ def _decision(claim_id: str, verdict: str = "supported") -> dict[str, object]:
         "rationale": "The cited deterministic fact supports the atomic claim.",
         "reviewed_at": datetime(2026, 8, 16, 12, tzinfo=UTC).isoformat(),
     }
+
+
+def _write_assessment(tmp_path: Path) -> Path:
+    path = tmp_path / "assessment.json"
+    path.write_text(export_stored_assessment(_run()).model_dump_json())
+    return path
 
 
 def test_claim_identity_is_content_addressed_from_text_and_cited_facts() -> None:
@@ -167,7 +215,7 @@ def test_missing_review_is_failed_not_zero_unsupported_rate() -> None:
         }
     )
 
-    result = evaluate_review(claims, review)
+    result = evaluate_review(claims, review, export_stored_assessment(_run()))
 
     assert result.complete is False
     assert result.accepted is False
@@ -191,7 +239,7 @@ def test_any_unsupported_claim_fails_and_rate_uses_all_reviewed_claims() -> None
         }
     )
 
-    result = evaluate_review(claims, review)
+    result = evaluate_review(claims, review, export_stored_assessment(_run()))
 
     assert result.complete is True
     assert result.accepted is False
@@ -219,7 +267,7 @@ def test_duplicate_conflicting_or_unknown_decisions_are_rejected() -> None:
         }
     )
     with pytest.raises(ValueError, match="unknown claim"):
-        evaluate_review(claims, unknown)
+        evaluate_review(claims, unknown, export_stored_assessment(_run()))
 
 
 def test_claim_and_review_versions_must_match() -> None:
@@ -233,13 +281,14 @@ def test_claim_and_review_versions_must_match() -> None:
     )
 
     with pytest.raises(ValueError, match="versions do not match"):
-        evaluate_review(claims, review)
+        evaluate_review(claims, review, export_stored_assessment(_run()))
 
 
 def test_review_cli_returns_nonzero_for_incomplete_and_unsupported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     claims = _claims()
+    assessment_path = _write_assessment(tmp_path)
     claims_path = tmp_path / "claims.json"
     claims_path.write_text(claims.model_dump_json())
     review_path = tmp_path / "review.yaml"
@@ -261,6 +310,8 @@ def test_review_cli_returns_nonzero_for_incomplete_and_unsupported(
             str(claims_path),
             "--review",
             str(review_path),
+            "--assessment",
+            str(assessment_path),
         ],
     )
 
@@ -272,6 +323,7 @@ def test_review_cli_rejects_oversized_claim_export_without_echoing_it(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    assessment_path = _write_assessment(tmp_path)
     claims_path = tmp_path / "claims.json"
     claims_path.write_text("secret" * 400_000)
     review_path = tmp_path / "review.yaml"
@@ -288,6 +340,8 @@ def test_review_cli_rejects_oversized_claim_export_without_echoing_it(
             str(claims_path),
             "--review",
             str(review_path),
+            "--assessment",
+            str(assessment_path),
         ],
     )
 
@@ -301,6 +355,7 @@ def test_review_cli_rejects_arbitrary_prebuilt_claims(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    assessment_path = _write_assessment(tmp_path)
     claims_path = tmp_path / "claims.json"
     claims_path.write_text(
         json.dumps(
@@ -327,6 +382,8 @@ def test_review_cli_rejects_arbitrary_prebuilt_claims(
             str(claims_path),
             "--review",
             str(review_path),
+            "--assessment",
+            str(assessment_path),
         ],
     )
 
@@ -338,6 +395,7 @@ def test_complete_supported_review_cli_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     claims = _claims()
+    assessment_path = _write_assessment(tmp_path)
     claims_path = tmp_path / "claims.json"
     claims_path.write_text(claims.model_dump_json())
     review_path = tmp_path / "review.json"
@@ -360,6 +418,8 @@ def test_complete_supported_review_cli_is_idempotent(
             str(claims_path),
             "--review",
             str(review_path),
+            "--assessment",
+            str(assessment_path),
         ],
     )
 

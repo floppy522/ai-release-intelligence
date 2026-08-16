@@ -8,15 +8,18 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Self
+from uuid import UUID
 
 import yaml
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, TypeAdapter, field_validator, model_validator
 
 from release_intelligence.application.explanations import (
     AIExplanationRejected,
     ExplanationValidator,
+    build_explanation_input,
 )
 from release_intelligence.benchmark.schema import StrictModel, read_bounded_text
+from release_intelligence.domain.models import ReleaseSnapshot
 from release_intelligence.ports.ai import (
     AIExplanation,
     ExplanationEvidence,
@@ -24,6 +27,7 @@ from release_intelligence.ports.ai import (
     ExplanationInput,
     FindingSeverity,
 )
+from release_intelligence.ports.repositories import StoredAnalysisRun
 
 _ID = re.compile(r"^[a-z][a-z0-9_-]{0,99}$")
 _RULE_ID = re.compile(r"^[a-z][a-z0-9_.:-]{0,238}$")
@@ -158,9 +162,152 @@ def stable_claim_id(
     return "claim-" + _digest(canonical).removeprefix("sha256:")
 
 
+class StoredSnapshotIdentity(StrictModel):
+    repository_id: str = Field(min_length=1, max_length=255)
+    repository_full_name: str = Field(min_length=1, max_length=255)
+    snapshot_version: str = Field(min_length=1, max_length=50)
+    release_name: str = Field(min_length=1, max_length=200)
+    milestone_number: int = Field(ge=1)
+    candidate_ref: str = Field(min_length=1, max_length=255)
+    candidate_sha: str = Field(pattern=r"^(?:[0-9a-f]{40})?$")
+    source_fetched_at: datetime
+
+    @field_validator(
+        "repository_id",
+        "repository_full_name",
+        "snapshot_version",
+        "release_name",
+        "candidate_ref",
+    )
+    @classmethod
+    def nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("snapshot identity fields must not be blank")
+        return value.strip()
+
+    @field_validator("source_fetched_at")
+    @classmethod
+    def aware_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("source timestamp must be timezone-aware")
+        return value
+
+
+class AssessmentReference(StrictModel):
+    artifact_version: str
+    artifact_kind: Literal["stored_analysis_run"]
+    analysis_run_id: str
+    repository_id: str
+    repository_full_name: str
+    snapshot_fingerprint: str
+    assessment_digest: str
+
+    @field_validator("artifact_version")
+    @classmethod
+    def valid_version(cls, value: str) -> str:
+        return _valid_version(value)
+
+    @field_validator("analysis_run_id")
+    @classmethod
+    def valid_run_id(cls, value: str) -> str:
+        try:
+            parsed = UUID(value)
+        except ValueError as error:
+            raise ValueError("analysis run ID must be a UUID") from error
+        if str(parsed) != value:
+            raise ValueError("analysis run ID must be canonical")
+        return value
+
+    @field_validator("repository_id", "repository_full_name")
+    @classmethod
+    def nonblank(cls, value: str) -> str:
+        if not value.strip() or len(value) > 255:
+            raise ValueError("repository identity must be bounded and nonblank")
+        return value.strip()
+
+    @field_validator("snapshot_fingerprint", "assessment_digest")
+    @classmethod
+    def canonical_digest(cls, value: str) -> str:
+        if _PACKET_HASH.fullmatch(value) is None:
+            raise ValueError("trusted artifact digest must be canonical SHA-256")
+        return value
+
+
+class StoredAssessmentArtifact(StrictModel):
+    version: str
+    artifact_kind: Literal["stored_analysis_run"] = "stored_analysis_run"
+    analysis_run_id: str
+    policy_version: str = Field(min_length=1, max_length=255)
+    snapshot: StoredSnapshotIdentity
+    source: ExplanationInput
+    snapshot_fingerprint: str
+    assessment_digest: str
+
+    @field_validator("version")
+    @classmethod
+    def valid_version(cls, value: str) -> str:
+        return _valid_version(value)
+
+    @field_validator("analysis_run_id")
+    @classmethod
+    def valid_run_id(cls, value: str) -> str:
+        return AssessmentReference.valid_run_id(value)
+
+    @field_validator("policy_version")
+    @classmethod
+    def nonblank_policy(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("policy version must not be blank")
+        return value.strip()
+
+    @field_validator("snapshot_fingerprint", "assessment_digest")
+    @classmethod
+    def canonical_digest(cls, value: str) -> str:
+        return AssessmentReference.canonical_digest(value)
+
+    @model_validator(mode="after")
+    def canonical_trusted_artifact(self) -> Self:
+        canonical_source = _canonical_source(self.source)
+        expected_assessment = _assessment_digest(
+            self.version,
+            self.artifact_kind,
+            self.analysis_run_id,
+            self.policy_version,
+            self.snapshot,
+            self.snapshot_fingerprint,
+            canonical_source,
+        )
+        if self.assessment_digest != expected_assessment:
+            raise ValueError("assessment digest does not match trusted artifact")
+        try:
+            source_time = datetime.fromisoformat(canonical_source.source_fetched_at)
+        except ValueError as error:
+            raise ValueError("source timestamp is not canonical") from error
+        if (
+            canonical_source.release_name != self.snapshot.release_name
+            or source_time != self.snapshot.source_fetched_at
+        ):
+            raise ValueError("source facts do not match snapshot identity")
+        object.__setattr__(self, "source", canonical_source)
+        return self
+
+    @property
+    def reference(self) -> AssessmentReference:
+        return AssessmentReference(
+            artifact_version=self.version,
+            artifact_kind=self.artifact_kind,
+            analysis_run_id=self.analysis_run_id,
+            repository_id=self.snapshot.repository_id,
+            repository_full_name=self.snapshot.repository_full_name,
+            snapshot_fingerprint=self.snapshot_fingerprint,
+            assessment_digest=self.assessment_digest,
+        )
+
+
 class ClaimsDocument(StrictModel):
     version: str
     scenario_id: str
+    assessment: AssessmentReference
     source: ExplanationInput
     explanation: AIExplanation
     claims: tuple[AtomicClaim, ...] = Field(min_length=1, max_length=10_000)
@@ -187,6 +334,8 @@ class ClaimsDocument(StrictModel):
 
     @model_validator(mode="after")
     def validate_grounded_packet(self) -> Self:
+        if self.scenario_id != _run_scenario_id(self.assessment.analysis_run_id):
+            raise ValueError("scenario ID does not match analysis run identity")
         source = _canonical_source(self.source)
         explanation = _canonical_explanation(source, self.explanation)
         expected = _claims_for(self.scenario_id, source, explanation)
@@ -196,6 +345,7 @@ class ClaimsDocument(StrictModel):
         expected_hash = _packet_digest(
             self.version,
             self.scenario_id,
+            self.assessment,
             source,
             explanation,
             expected,
@@ -278,22 +428,59 @@ class ReviewResult(StrictModel):
     decisions: tuple[ClaimReview, ...]
 
 
+def export_stored_assessment(
+    run: StoredAnalysisRun,
+    *,
+    version: str = "1.0.0",
+) -> StoredAssessmentArtifact:
+    _valid_version(version)
+    source = _canonical_source(build_explanation_input(run))
+    snapshot = StoredSnapshotIdentity(
+        repository_id=run.snapshot.repository_id,
+        repository_full_name=run.snapshot.repository_full_name,
+        snapshot_version=run.snapshot.snapshot_version.value,
+        release_name=run.snapshot.release_name,
+        milestone_number=run.snapshot.milestone_number,
+        candidate_ref=run.snapshot.candidate_ref,
+        candidate_sha=run.snapshot.candidate_sha,
+        source_fetched_at=run.source_fetched_at,
+    )
+    snapshot_fingerprint = _snapshot_digest(run.snapshot)
+    assessment_digest = _assessment_digest(
+        version,
+        "stored_analysis_run",
+        str(run.id),
+        run.policy_version,
+        snapshot,
+        snapshot_fingerprint,
+        source,
+    )
+    return StoredAssessmentArtifact(
+        version=version,
+        analysis_run_id=str(run.id),
+        policy_version=run.policy_version,
+        snapshot=snapshot,
+        source=source,
+        snapshot_fingerprint=snapshot_fingerprint,
+        assessment_digest=assessment_digest,
+    )
+
+
 def export_claim_packet(
     *,
-    scenario_id: str,
-    source: ExplanationInput,
+    run: StoredAnalysisRun,
     explanation: AIExplanation,
     version: str = "1.0.0",
 ) -> ClaimsDocument:
-    _valid_version(version)
-    if _ID.fullmatch(scenario_id) is None:
-        raise ValueError("scenario ID must be canonical")
-    canonical_source = _canonical_source(ExplanationInput.model_validate(source))
+    artifact = export_stored_assessment(run, version=version)
+    scenario_id = _run_scenario_id(artifact.analysis_run_id)
+    canonical_source = artifact.source
     canonical_explanation = ExplanationValidator(canonical_source).validate(explanation)
     claims = _claims_for(scenario_id, canonical_source, canonical_explanation)
     packet_hash = _packet_digest(
         version,
         scenario_id,
+        artifact.reference,
         canonical_source,
         canonical_explanation,
         claims,
@@ -301,6 +488,7 @@ def export_claim_packet(
     return ClaimsDocument(
         version=version,
         scenario_id=scenario_id,
+        assessment=artifact.reference,
         source=canonical_source,
         explanation=canonical_explanation,
         claims=claims,
@@ -308,7 +496,12 @@ def export_claim_packet(
     )
 
 
-def evaluate_review(claims: ClaimsDocument, review: ReviewDocument) -> ReviewResult:
+def evaluate_review(
+    claims: ClaimsDocument,
+    review: ReviewDocument,
+    assessment: StoredAssessmentArtifact,
+) -> ReviewResult:
+    _validate_trusted_assessment(claims, assessment)
     if claims.version != review.version:
         raise ValueError("claim and review versions do not match")
     if claims.packet_hash != review.packet_hash:
@@ -338,6 +531,17 @@ def evaluate_review(claims: ClaimsDocument, review: ReviewDocument) -> ReviewRes
         missing_claim_ids=(),
         decisions=decisions,
     )
+
+
+def _validate_trusted_assessment(
+    claims: ClaimsDocument, assessment: StoredAssessmentArtifact
+) -> None:
+    if claims.assessment != assessment.reference or claims.source != assessment.source:
+        raise ValueError("claim packet does not match trusted assessment artifact")
+
+
+def _run_scenario_id(analysis_run_id: str) -> str:
+    return f"run-{analysis_run_id}"
 
 
 def _canonical_source(source: ExplanationInput) -> ExplanationInput:
@@ -486,6 +690,7 @@ def _claims_for(
 def _packet_digest(
     version: str,
     scenario_id: str,
+    assessment: AssessmentReference,
     source: ExplanationInput,
     explanation: AIExplanation,
     claims: tuple[AtomicClaim, ...],
@@ -494,11 +699,39 @@ def _packet_digest(
         {
             "version": version,
             "scenario_id": scenario_id,
+            "assessment": assessment.model_dump(mode="json"),
             "source": source.model_dump(mode="json"),
             "explanation": explanation.model_dump(mode="json"),
             "claims": [claim.model_dump(mode="json") for claim in claims],
         }
     )
+
+
+def _assessment_digest(
+    version: str,
+    artifact_kind: str,
+    analysis_run_id: str,
+    policy_version: str,
+    snapshot: StoredSnapshotIdentity,
+    snapshot_fingerprint: str,
+    source: ExplanationInput,
+) -> str:
+    return _digest(
+        {
+            "version": version,
+            "artifact_kind": artifact_kind,
+            "analysis_run_id": analysis_run_id,
+            "policy_version": policy_version,
+            "snapshot": snapshot.model_dump(mode="json"),
+            "snapshot_fingerprint": snapshot_fingerprint,
+            "source": source.model_dump(mode="json"),
+        }
+    )
+
+
+def _snapshot_digest(snapshot: ReleaseSnapshot) -> str:
+    canonical = TypeAdapter(ReleaseSnapshot).dump_python(snapshot, mode="json")
+    return _digest(canonical)
 
 
 def _digest(value: object) -> str:
@@ -519,11 +752,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Review grounded benchmark AI claims")
     parser.add_argument("--claims", type=Path, required=True)
     parser.add_argument("--review", type=Path, required=True)
+    parser.add_argument("--assessment", type=Path)
     args = parser.parse_args()
     try:
+        if args.assessment is None:
+            raise ValueError("trusted assessment artifact is required")
         claims = ClaimsDocument.model_validate(_load(args.claims))
         review = ReviewDocument.model_validate(_load(args.review))
-        result = evaluate_review(claims, review)
+        assessment = StoredAssessmentArtifact.model_validate(_load(args.assessment))
+        result = evaluate_review(claims, review, assessment)
     except (
         OSError,
         UnicodeError,
