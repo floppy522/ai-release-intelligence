@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from uuid import UUID, uuid4
@@ -515,7 +516,9 @@ async def test_auth_failures_are_typed_sanitized_and_never_echo_secrets(
     client: httpx.AsyncClient,
     oauth: FakeOAuthGateway,
     store: FakeAuthStore,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO)
     malformed_secret = "malformed-code-secret" * 100
     malformed = await client.get(
         "/api/auth/github/callback",
@@ -563,6 +566,7 @@ async def test_auth_failures_are_typed_sanitized_and_never_echo_secrets(
         "secret-password",
     ):
         assert secret not in combined_bodies
+        assert secret not in caplog.text
 
 
 async def test_settings_lifespan_wires_auth_and_closes_shared_resources(

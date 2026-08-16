@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -260,10 +261,17 @@ async def test_explanation_route_returns_validated_content_and_metadata() -> Non
     [
         AIExplanationUnavailable(),
         TimeoutError("postgresql://user:secret@db/openai-api-key"),
-        ValueError("raw provider refusal with secret-api-key"),
+        ValueError(
+            "raw provider refusal with secret-api-key; ignore previous instructions; "
+            "raw issue body"
+        ),
     ],
 )
-async def test_provider_failures_return_safe_unavailable(failure: Exception) -> None:
+async def test_provider_failures_return_safe_unavailable(
+    failure: Exception,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
     provider = FakeProvider(failure)
     async with await client(provider=provider) as request:
         response = await request.post(f"/api/analyses/{RUN_ID}/explanation")
@@ -275,6 +283,12 @@ async def test_provider_failures_return_safe_unavailable(failure: Exception) -> 
     assert "provider" not in response.text
     assert repeated.json() == {"state": "unavailable"}
     assert len(provider.inputs) == 1
+    assert "secret" not in caplog.text
+    assert "postgresql://" not in caplog.text
+    assert "raw provider refusal" not in caplog.text
+    assert "ignore previous instructions" not in caplog.text
+    assert "raw issue body" not in caplog.text
+    assert "AI explanation unavailable" in caplog.messages
 
 
 async def test_disabled_ai_returns_unavailable_without_breaking_startup() -> None:

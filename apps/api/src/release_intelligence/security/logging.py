@@ -30,6 +30,16 @@ SAFE_APPLICATION_FIELDS = frozenset(
         "ai_cost",
     }
 )
+SENSITIVE_DEPENDENCY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "httpcore.connection",
+    "httpcore.http11",
+    "openai",
+    "openai._base_client",
+    "sqlalchemy.engine",
+    "sqlalchemy.pool",
+)
 _DECIMAL = re.compile(r"^(?:0|[1-9][0-9]{0,9})(?:\.[0-9]{1,6})?$")
 _STANDARD_LOG_RECORD_FIELDS = frozenset(
     logging.LogRecord("", 0, "", 0, "", (), None).__dict__
@@ -129,6 +139,12 @@ def get_safe_logger(name: str) -> logging.Logger:
     ):
         logger.addFilter(ApplicationLogRedactionFilter())
     return logger
+
+
+def install_application_log_redaction() -> None:
+    """Protect known auth, provider, and persistence dependency log boundaries."""
+    for name in SENSITIVE_DEPENDENCY_LOGGERS:
+        get_safe_logger(name)
 
 
 def install_access_log_redaction() -> None:

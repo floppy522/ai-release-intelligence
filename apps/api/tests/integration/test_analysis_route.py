@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -504,10 +505,13 @@ async def test_missing_milestone_or_branch_returns_422(
 
 async def test_repository_and_github_authorization_failures_return_403(
     store: FakeAuthStore,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO)
+    unauthorized_loader = FakeLoader(snapshot())
     store.allow_repository = False
     async with await request_client(
-        service(FakeLoader(snapshot()), MemoryAnalysisRepository()), store
+        service(unauthorized_loader, MemoryAnalysisRepository()), store
     ) as client:
         repository_denied = await client.post(
             "/api/analyses",
@@ -518,8 +522,13 @@ async def test_repository_and_github_authorization_failures_return_403(
             },
         )
     store.allow_repository = True
+    github_failure = GitHubUnauthorized()
+    github_failure.__cause__ = RuntimeError(
+        "raw GitHub response body with private-token-secret"
+    )
+    github_loader = FakeLoader(github_failure)
     async with await request_client(
-        service(FakeLoader(GitHubUnauthorized()), MemoryAnalysisRepository()), store
+        service(github_loader, MemoryAnalysisRepository()), store
     ) as client:
         github_denied = await client.post(
             "/api/analyses",
@@ -532,6 +541,11 @@ async def test_repository_and_github_authorization_failures_return_403(
 
     assert repository_denied.status_code == 403
     assert github_denied.status_code == 403
+    assert unauthorized_loader.requests == []
+    assert len(github_loader.requests) == 1
+    assert "session" not in caplog.text.casefold()
+    assert "private-token-secret" not in caplog.text
+    assert "raw GitHub response body" not in caplog.text
 
 
 async def test_database_error_http_mapping_returns_503(
@@ -557,7 +571,9 @@ async def test_database_error_http_mapping_returns_503(
 
 async def test_policy_database_error_http_mapping_is_sanitized_503(
     store: FakeAuthStore,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO)
     policy_repository = FakePolicyStore(None, failure=True)
     async with await request_client(
         service(FakeLoader(snapshot()), MemoryAnalysisRepository(), policy_repository),
@@ -575,6 +591,8 @@ async def test_policy_database_error_http_mapping_is_sanitized_503(
     assert response.status_code == 503
     assert response.json() == {"detail": "Analysis persistence unavailable"}
     assert "secret-password" not in response.text
+    assert "secret-password" not in caplog.text
+    assert "postgresql://" not in caplog.text
 
 
 @pytest.mark.parametrize(

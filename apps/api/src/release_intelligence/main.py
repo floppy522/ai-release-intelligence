@@ -55,7 +55,10 @@ from release_intelligence.security.crypto import (
     digest_matches,
     token_digest,
 )
-from release_intelligence.security.logging import install_access_log_redaction
+from release_intelligence.security.logging import (
+    install_access_log_redaction,
+    install_application_log_redaction,
+)
 
 UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 DEFAULT_SESSION_TTL_SECONDS = 8 * 60 * 60
@@ -146,6 +149,7 @@ def create_app(
     explanation_service: ExplanationService | None = None,
     openai_client_factory: OpenAIClientFactory = _openai_client,
 ) -> FastAPI:
+    install_application_log_redaction()
     effective_clock = clock or (lambda: datetime.now(UTC))
 
     @asynccontextmanager

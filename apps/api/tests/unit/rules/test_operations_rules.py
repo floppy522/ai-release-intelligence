@@ -366,10 +366,13 @@ def test_substring_heading_is_not_a_structured_field() -> None:
 def test_job_url_uses_normalized_check_identity_not_job_id_namespace() -> None:
     job_url = "https://github.com/acme/widgets/actions/runs/800/jobs/700"
     body = COMPLETE_BODY + f"\n\n### Migration evidence\n{job_url}"
+    normalized_check = _check(url=job_url, run_id=9400002)
+
+    assert normalized_check.run_id not in {800, 700}
 
     assert (
         evaluate_operations(
-            _snapshot(_issue(body=body), checks=(_check(url=job_url),)), POLICY
+            _snapshot(_issue(body=body), checks=(normalized_check,)), POLICY
         )
         == ()
     )
