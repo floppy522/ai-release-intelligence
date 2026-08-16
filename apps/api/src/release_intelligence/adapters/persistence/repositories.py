@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import selectinload
 
 from release_intelligence.adapters.persistence.models import (
+    AIExplanationRow,
     AnalysisRunRow,
     FindingEvidenceRow,
     HumanDecisionRow,
@@ -48,6 +49,10 @@ from release_intelligence.domain.models import (
 )
 from release_intelligence.domain.policy import PolicyValidationError, ReleasePolicy
 from release_intelligence.domain.rules.checks import CheckDecision
+from release_intelligence.ports.ai import (
+    AI_EXPLANATION_PENDING_CONTENT,
+    AI_EXPLANATION_UNAVAILABLE_CONTENT,
+)
 from release_intelligence.ports.repositories import (
     ImmutableSnapshotError,
     IncompatibleSnapshotError,
@@ -235,6 +240,58 @@ class AnalysisRepository:
     async def replace_snapshot(self, run_id: UUID, snapshot: ReleaseSnapshot) -> None:
         del run_id, snapshot
         raise ImmutableSnapshotError("Release snapshots are immutable once persisted")
+
+    async def load_explanation(self, run_id: UUID) -> str | None:
+        statement = select(AIExplanationRow.content).where(
+            AIExplanationRow.analysis_run_id == run_id
+        )
+        async with self._sessions() as session:
+            return cast(str | None, await session.scalar(statement))
+
+    async def reserve_explanation(self, run_id: UUID) -> bool:
+        statement = (
+            insert(AIExplanationRow)
+            .values(
+                analysis_run_id=run_id,
+                content=AI_EXPLANATION_PENDING_CONTENT,
+            )
+            .on_conflict_do_nothing(index_elements=["analysis_run_id"])
+            .returning(AIExplanationRow.id)
+        )
+        async with self._sessions() as session, session.begin():
+            reserved_id = await session.scalar(statement)
+        return reserved_id is not None
+
+    async def complete_explanation(self, run_id: UUID, content: str) -> None:
+        await self._transition_explanation(
+            run_id,
+            expected=AI_EXPLANATION_PENDING_CONTENT,
+            content=content,
+        )
+
+    async def fail_explanation(self, run_id: UUID) -> None:
+        await self._transition_explanation(
+            run_id,
+            expected=AI_EXPLANATION_PENDING_CONTENT,
+            content=AI_EXPLANATION_UNAVAILABLE_CONTENT,
+        )
+
+    async def _transition_explanation(
+        self,
+        run_id: UUID,
+        *,
+        expected: str,
+        content: str,
+    ) -> None:
+        async with self._sessions() as session, session.begin():
+            row = await session.scalar(
+                select(AIExplanationRow)
+                .where(AIExplanationRow.analysis_run_id == run_id)
+                .with_for_update()
+            )
+            if row is None or row.content != expected:
+                raise SQLAlchemyError("AI explanation state transition rejected")
+            row.content = content
 
     async def persist_decision(
         self,

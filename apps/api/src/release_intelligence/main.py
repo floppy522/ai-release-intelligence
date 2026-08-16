@@ -6,9 +6,15 @@ from typing import Protocol, cast
 import httpx
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
+from openai import AsyncOpenAI
 from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 
+from release_intelligence.adapters.ai.openai_provider import (
+    DEFAULT_TIMEOUT_SECONDS,
+    OpenAIClient,
+    OpenAIExplanationProvider,
+)
 from release_intelligence.adapters.github.auth import (
     GitHubAppTokenProvider,
     GitHubOAuthGateway,
@@ -24,6 +30,7 @@ from release_intelligence.api.dependencies import (
 )
 from release_intelligence.api.routes.auth import router as auth_router
 from release_intelligence.api.routes.decisions import router as decisions_router
+from release_intelligence.api.routes.explanations import router as explanations_router
 from release_intelligence.api.routes.releases import router as releases_router
 from release_intelligence.api.routes.repositories import router as repositories_router
 from release_intelligence.api.schemas import AssessmentResponse
@@ -35,8 +42,10 @@ from release_intelligence.application.analyze_release import (
     assess_fixture_release,
 )
 from release_intelligence.application.decisions import DecisionService, DecisionStore
+from release_intelligence.application.explanations import ExplanationService
 from release_intelligence.config import AppSettings
 from release_intelligence.domain.models import ReadinessAssessment
+from release_intelligence.ports.ai import AIExplanationStore
 from release_intelligence.ports.auth import AuthPersistenceError
 from release_intelligence.ports.github import GitHubHttpClient
 from release_intelligence.ports.policies import PolicyRepositoryPort
@@ -61,11 +70,15 @@ class ManagedGitHubHttpClient(GitHubHttpClient, Protocol):
     async def aclose(self) -> None: ...
 
 
-class ManagedAnalysisRepository(AnalysisRepositoryPort, Protocol):
+class ManagedAnalysisRepository(AnalysisRepositoryPort, AIExplanationStore, Protocol):
     pass
 
 
 class ManagedPolicyRepository(PolicyRepositoryPort, Protocol):
+    async def close(self) -> None: ...
+
+
+class ManagedOpenAIClient(OpenAIClient, Protocol):
     async def close(self) -> None: ...
 
 
@@ -75,6 +88,7 @@ AnalysisRepositoryFactory = Callable[
     [str, Callable[[], datetime]], ManagedAnalysisRepository
 ]
 PolicyRepositoryFactory = Callable[[str], ManagedPolicyRepository]
+OpenAIClientFactory = Callable[[str], ManagedOpenAIClient]
 
 
 def _auth_repository(database_url: str) -> ManagedAuthStore:
@@ -101,6 +115,17 @@ def _policy_repository(database_url: str) -> ManagedPolicyRepository:
     return PolicyRepository(database_url)
 
 
+def _openai_client(api_key: str) -> ManagedOpenAIClient:
+    return cast(
+        ManagedOpenAIClient,
+        AsyncOpenAI(
+            api_key=api_key,
+            max_retries=0,
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+        ),
+    )
+
+
 def create_app(
     *,
     auth_store: AuthStore | None = None,
@@ -118,6 +143,8 @@ def create_app(
     analysis_repository_factory: AnalysisRepositoryFactory = _analysis_repository,
     policy_store: PolicyRepositoryPort | None = None,
     policy_repository_factory: PolicyRepositoryFactory = _policy_repository,
+    explanation_service: ExplanationService | None = None,
+    openai_client_factory: OpenAIClientFactory = _openai_client,
 ) -> FastAPI:
     effective_clock = clock or (lambda: datetime.now(UTC))
 
@@ -130,10 +157,12 @@ def create_app(
         owned_client: ManagedGitHubHttpClient | None = None
         owned_analysis_repository: ManagedAnalysisRepository | None = None
         owned_policy_repository: ManagedPolicyRepository | None = None
+        owned_openai_client: ManagedOpenAIClient | None = None
         configuration = settings
         configured_analysis_service = analysis_service
         configured_decision_service = decision_service
         configured_policy_store = policy_store
+        configured_explanation_service = explanation_service
         try:
             install_access_log_redaction()
             if configure_auth and (
@@ -205,18 +234,47 @@ def create_app(
                         clock=effective_clock,
                         store=cast(DecisionStore, owned_analysis_repository),
                     )
+                if (
+                    configured_explanation_service is None
+                    and configuration.openai_api_key is not None
+                ):
+                    input_price = configuration.openai_input_cost_per_million
+                    output_price = configuration.openai_output_cost_per_million
+                    if input_price is None or output_price is None:
+                        raise ValueError("AI token prices are required")
+                    owned_openai_client = openai_client_factory(
+                        configuration.openai_api_key.get_secret_value()
+                    )
+                    configured_explanation_service = ExplanationService(
+                        OpenAIExplanationProvider(
+                            client=owned_openai_client,
+                            model=configuration.openai_model,
+                            input_cost_per_million=input_price,
+                            output_cost_per_million=output_price,
+                        ),
+                        store=(
+                            owned_analysis_repository
+                            if owned_analysis_repository is not None
+                            else None
+                        ),
+                    )
             application.state.auth_store = store
             application.state.oauth_gateway = gateway
             application.state.credential_cipher = credential_cipher
             application.state.analysis_service = configured_analysis_service
             application.state.decision_service = configured_decision_service
             application.state.policy_store = configured_policy_store
+            application.state.explanation_service = configured_explanation_service
             yield
         finally:
             try:
                 try:
-                    if owned_policy_repository is not None:
-                        await owned_policy_repository.close()
+                    try:
+                        if owned_openai_client is not None:
+                            await owned_openai_client.close()
+                    finally:
+                        if owned_policy_repository is not None:
+                            await owned_policy_repository.close()
                 finally:
                     if owned_analysis_repository is not None:
                         await owned_analysis_repository.close()
@@ -239,10 +297,12 @@ def create_app(
     application.state.analysis_service = analysis_service
     application.state.decision_service = decision_service
     application.state.policy_store = policy_store
+    application.state.explanation_service = explanation_service
     application.include_router(repositories_router)
     application.include_router(auth_router)
     application.include_router(releases_router)
     application.include_router(decisions_router)
+    application.include_router(explanations_router)
 
     @application.middleware("http")
     async def enforce_csrf(

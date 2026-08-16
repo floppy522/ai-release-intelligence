@@ -1,6 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 
-import { getAnalysisRun, getCsrfBootstrap, getDemoAnalysis } from "../api/client";
+import {
+  getAIExplanation,
+  getAnalysisRun,
+  getCsrfBootstrap,
+  getDemoAnalysis,
+} from "../api/client";
 import type { AnalysisRun } from "../api/types";
 import { ReleaseReport } from "../features/report/ReleaseReport";
 
@@ -25,6 +30,17 @@ export function App() {
     queryFn: getDemoAnalysis,
     enabled: demoMode,
   });
+  const explanationMutation = useMutation({
+    mutationKey: ["ai-explanation", runId],
+    mutationFn: () => {
+      const csrfToken = csrfQuery.data?.csrf_token;
+      if (!runId || !csrfToken) {
+        throw new Error("Secure explanation request unavailable");
+      }
+      return getAIExplanation(runId, csrfToken);
+    },
+    retry: false,
+  });
 
   if (runId) {
     if (analysisQuery.isPending || csrfQuery.isPending) {
@@ -47,7 +63,17 @@ export function App() {
         repositoryFullName={analysis.repository_full_name}
         runId={analysis.run_id}
         csrfToken={csrfQuery.data.csrf_token}
-        onDecisionRecorded={() => void analysisQuery.refetch()}
+        onDecisionRecorded={() => {
+          explanationMutation.reset();
+          void analysisQuery.refetch();
+        }}
+        aiExplanation={
+          explanationMutation.data?.state === "available"
+            ? explanationMutation.data.explanation
+            : undefined
+        }
+        aiExplanationState={aiExplanationState(explanationMutation)}
+        onAIExplanationRequest={() => explanationMutation.mutate()}
       />
     );
   }
@@ -72,6 +98,19 @@ export function App() {
       <p>Open an analysis run to review release readiness.</p>
     </main>
   );
+}
+
+function aiExplanationState(mutation: {
+  isPending: boolean;
+  isError: boolean;
+  data?: { state: "available" | "unavailable" };
+}): "idle" | "loading" | "available" | "unavailable" {
+  if (mutation.isPending) return "loading";
+  if (mutation.isError || mutation.data?.state === "unavailable") {
+    return "unavailable";
+  }
+  if (mutation.data?.state === "available") return "available";
+  return "idle";
 }
 
 function isAnalysisRun(value: object): value is AnalysisRun {

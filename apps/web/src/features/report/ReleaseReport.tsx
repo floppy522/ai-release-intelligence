@@ -1,11 +1,13 @@
 import { useId } from "react";
 
 import type {
+  AIExplanationContent,
   DecisionFinding,
   ReadinessAssessment,
   ReadinessFinding,
   ReleaseStatus,
 } from "../../api/types";
+import { AIExplanation, type AIExplanationState } from "./AIExplanation";
 import { DecisionForm } from "../decisions/DecisionForm";
 import { FindingCard } from "./FindingCard";
 import { SupportingDetails } from "./SupportingDetails";
@@ -20,6 +22,9 @@ interface ReleaseReportProps {
   csrfToken?: string;
   demo?: boolean;
   onDecisionRecorded?: () => void;
+  aiExplanation?: AIExplanationContent;
+  aiExplanationState?: AIExplanationState;
+  onAIExplanationRequest?: () => void;
 }
 
 export function ReleaseReport({
@@ -32,6 +37,9 @@ export function ReleaseReport({
   csrfToken = "",
   demo = false,
   onDecisionRecorded,
+  aiExplanation,
+  aiExplanationState,
+  onAIExplanationRequest,
 }: ReleaseReportProps) {
   const sectionId = useId();
   const attentionHeadingId = `${sectionId}-attention`;
@@ -118,6 +126,14 @@ export function ReleaseReport({
         status={assessment.status}
         headingId={supportingHeadingId}
       />
+      {aiExplanationState ? (
+        <AIExplanation
+          status={assessment.status}
+          state={aiExplanationState}
+          explanation={aiExplanation}
+          onRequest={onAIExplanationRequest}
+        />
+      ) : null}
     </main>
   );
 }

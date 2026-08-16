@@ -28,6 +28,46 @@ export interface ReadinessAssessment {
   findings: readonly ReadinessFinding[];
 }
 
+export interface AIExplanationGroup {
+  title: string;
+  explanation: string;
+  severity: string;
+  finding_ids: readonly string[];
+  evidence_ids: readonly string[];
+}
+
+export interface AIExplanationAction {
+  action: string;
+  finding_ids: readonly string[];
+  evidence_ids: readonly string[];
+}
+
+export interface AIExplanationContent {
+  summary: string;
+  groups: readonly AIExplanationGroup[];
+  actions: readonly AIExplanationAction[];
+  limitations: readonly string[];
+  confidence: "LOW" | "MEDIUM" | "HIGH";
+  finding_ids: readonly string[];
+  evidence_ids: readonly string[];
+}
+
+export interface AIExplanationMetadata {
+  model: string;
+  latency_seconds: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost: string;
+}
+
+export type AIExplanationResponse =
+  | { state: "unavailable" }
+  | {
+      state: "available";
+      explanation: AIExplanationContent;
+      metadata: AIExplanationMetadata;
+    };
+
 export type DecisionKind = "ACCEPTED_RISK" | "RELEASE_BLOCKER";
 
 export interface DecisionFinding extends ReadinessFinding {

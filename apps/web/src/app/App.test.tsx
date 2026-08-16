@@ -3,6 +3,7 @@ import { afterEach, vi } from "vitest";
 
 import {
   getAnalysisRun,
+  getAIExplanation,
   getCsrfBootstrap,
   getDemoAnalysis,
   recordDecision,
@@ -14,6 +15,7 @@ vi.mock("../api/client", () => ({
   getDemoAnalysis: vi.fn(),
   getAnalysisRun: vi.fn(),
   getCsrfBootstrap: vi.fn(),
+  getAIExplanation: vi.fn(),
   recordDecision: vi.fn(),
 }));
 
@@ -118,7 +120,7 @@ it("loads a real analysis-run DTO and wires authoritative decision controls", as
 
   renderWithQueryClient(<App />);
 
-  expect(await screen.findByText("NEEDS DECISION")).toBeInTheDocument();
+  expect(await screen.findAllByText("NEEDS DECISION")).toHaveLength(2);
   expect(getAnalysisRun).toHaveBeenCalledWith(runId);
   expect(getCsrfBootstrap).toHaveBeenCalledOnce();
   expect(screen.getByRole("button", { name: "Accept risk" })).toBeInTheDocument();
@@ -174,4 +176,86 @@ it.each(["bootstrap failure", "empty bootstrap token"] as const)("fails closed w
   expect(await screen.findByText(/secure session unavailable/i)).toBeInTheDocument();
   expect(screen.queryByText("READY")).toBeNull();
   expect(screen.queryByRole("button", { name: "Accept risk" })).toBeNull();
+});
+
+it("generates an opt-in AI explanation without replacing deterministic status", async () => {
+  const runId = "10000000-0000-0000-0000-000000000001";
+  window.history.replaceState(null, "", `/?analysis_run_id=${runId}`);
+  vi.mocked(getCsrfBootstrap).mockResolvedValue({ csrf_token: "real-csrf-token" });
+  vi.mocked(getAnalysisRun).mockResolvedValue({
+    run_id: runId,
+    status: "NOT_READY",
+    release_name: "Milestone 7",
+    repository_id: "987654",
+    repository_full_name: "acme/widgets",
+    source_fetched_at: "2026-08-07T14:30:00Z",
+    findings: NOT_READY_FIXTURE.findings,
+  });
+  vi.mocked(getAIExplanation).mockResolvedValue({
+    state: "available",
+    explanation: {
+      summary: "The existing blocker must be resolved.",
+      groups: [
+        {
+          title: "Blocking scope",
+          explanation: "The deterministic report identifies a blocker.",
+          severity: "BLOCKING",
+          finding_ids: ["10000000-0000-0000-0000-000000000010"],
+          evidence_ids: ["github-issue-142"],
+        },
+      ],
+      actions: [
+        {
+          action: "Link a merged PR to Issue #142",
+          finding_ids: ["10000000-0000-0000-0000-000000000010"],
+          evidence_ids: ["github-issue-142"],
+        },
+      ],
+      limitations: ["Only deterministic findings were supplied."],
+      confidence: "HIGH",
+      finding_ids: ["10000000-0000-0000-0000-000000000010"],
+      evidence_ids: ["github-issue-142"],
+    },
+    metadata: {
+      model: "gpt-5.6-2026-08-01",
+      latency_seconds: "0.250000",
+      input_tokens: 1000,
+      output_tokens: 500,
+      cost: "0.007500",
+    },
+  });
+
+  renderWithQueryClient(<App />);
+
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Generate AI explanation" }),
+  );
+  expect(await screen.findByText("The existing blocker must be resolved.")).toBeInTheDocument();
+  expect(getAIExplanation).toHaveBeenCalledWith(runId, "real-csrf-token");
+  expect(screen.getAllByText("NOT READY")).toHaveLength(2);
+  expect(screen.getByText(/does not change the deterministic readiness/i)).toBeInTheDocument();
+});
+
+it("keeps the deterministic report when AI is unavailable", async () => {
+  const runId = "10000000-0000-0000-0000-000000000001";
+  window.history.replaceState(null, "", `/?analysis_run_id=${runId}`);
+  vi.mocked(getCsrfBootstrap).mockResolvedValue({ csrf_token: "real-csrf-token" });
+  vi.mocked(getAnalysisRun).mockResolvedValue({
+    run_id: runId,
+    status: "NOT_READY",
+    release_name: "Milestone 7",
+    repository_id: "987654",
+    repository_full_name: "acme/widgets",
+    source_fetched_at: "2026-08-07T14:30:00Z",
+    findings: NOT_READY_FIXTURE.findings,
+  });
+  vi.mocked(getAIExplanation).mockResolvedValue({ state: "unavailable" });
+
+  renderWithQueryClient(<App />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Generate AI explanation" }),
+  );
+
+  expect(await screen.findByText("AI explanation unavailable.")).toBeInTheDocument();
+  expect(screen.getByText("Issue #142 has no linked PR")).toBeInTheDocument();
 });
