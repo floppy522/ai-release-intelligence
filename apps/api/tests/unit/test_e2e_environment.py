@@ -118,6 +118,33 @@ async def test_e2e_bootstrap_creates_real_session_csrf_and_repository_binding() 
     assert len(store.repositories) == 1
 
 
+async def test_e2e_bootstrap_can_repeat_without_resetting_repository_binding() -> None:
+    store = E2EAuthStore()
+    app = create_app(
+        auth_store=store,
+        cipher=CredentialCipher(SecretStr(Fernet.generate_key().decode())),
+        clock=lambda: NOW,
+        configure_auth=False,
+        environment="e2e",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://testserver"
+    ) as client:
+        first = await client.post("/api/e2e/bootstrap")
+        second = await client.post("/api/e2e/bootstrap")
+        csrf = await client.get("/api/auth/csrf")
+        repository = await client.get(
+            "/api/repositories/by-name/floppy522/ai-release-intelligence-demo"
+        )
+
+    assert first.status_code == second.status_code == 201
+    assert first.json() == second.json()
+    assert csrf.status_code == 200
+    assert repository.status_code == 200
+    assert len(store.sessions) == 2
+    assert len(store.repositories) == 1
+
+
 async def test_e2e_bootstrap_is_unavailable_outside_exact_environment() -> None:
     app = create_app(configure_auth=False, environment="production")
     async with httpx.AsyncClient(

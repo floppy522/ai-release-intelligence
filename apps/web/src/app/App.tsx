@@ -2,15 +2,23 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 
 import {
+  ApiError,
   bootstrapE2E,
   createAnalysis,
   getAIExplanation,
   getAnalysisRun,
   getCsrfBootstrap,
   getDemoAnalysis,
+  getReleasePolicy,
   putReleasePolicy,
 } from "../api/client";
-import type { AnalysisRun, E2EBootstrap } from "../api/types";
+import type {
+  AnalysisRun,
+  E2EBootstrap,
+  PolicyRecord,
+  PolicyUpsertPayload,
+  ReleasePolicy,
+} from "../api/types";
 import { ReleaseReport } from "../features/report/ReleaseReport";
 
 export function App() {
@@ -136,26 +144,7 @@ function E2EReleaseStart({ onStarted }: { onStarted: (runId: string) => void }) 
     setError(false);
     try {
       const { csrf_token: csrfToken } = await getCsrfBootstrap();
-      await putReleasePolicy(
-        fixture.repository_id,
-        {
-          main_branch: "main",
-          candidate_branch: fixture.candidate_ref,
-          milestone_number: fixture.milestone_number,
-          code_change_label: "code-change",
-          release_ops_label: "release-ops",
-          blocker_label: "release-blocker",
-          discovered_checks: ["blocking-suite", "advisory-tests"],
-          check_categories: {
-            "blocking-suite": "BLOCKING",
-            "advisory-tests": "ADVISORY",
-          },
-          previous_milestone_number: null,
-          previous_release_branch: null,
-          expected_version: null,
-        },
-        csrfToken,
-      );
+      await reconcileE2EPolicy(fixture, csrfToken);
       const accepted = await createAnalysis(
         {
           repository_id: fixture.repository_id,
@@ -206,6 +195,87 @@ function E2EReleaseStart({ onStarted }: { onStarted: (runId: string) => void }) 
       {error ? <p role="alert">Could not run the analysis.</p> : null}
     </section>
   );
+}
+
+const E2E_DISCOVERED_CHECKS = ["blocking-suite", "advisory-tests"] as const;
+
+function desiredE2EPolicy(fixture: E2EBootstrap): ReleasePolicy {
+  return {
+    main_branch: "main",
+    candidate_branch: fixture.candidate_ref,
+    milestone_number: fixture.milestone_number,
+    code_change_label: "code-change",
+    release_ops_label: "release-ops",
+    blocker_label: "release-blocker",
+    check_categories: {
+      "blocking-suite": "BLOCKING",
+      "advisory-tests": "ADVISORY",
+    },
+    previous_milestone_number: null,
+    previous_release_branch: null,
+  };
+}
+
+async function reconcileE2EPolicy(
+  fixture: E2EBootstrap,
+  csrfToken: string,
+): Promise<PolicyRecord> {
+  const desired = desiredE2EPolicy(fixture);
+  const current = await getReleasePolicy(fixture.repository_id);
+  if (current !== null && policiesEqual(current.policy, desired)) return current;
+  try {
+    return await writeE2EPolicy(
+      fixture.repository_id,
+      desired,
+      current?.version ?? null,
+      csrfToken,
+    );
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 409) throw error;
+  }
+
+  const latest = await getReleasePolicy(fixture.repository_id);
+  if (latest !== null && policiesEqual(latest.policy, desired)) return latest;
+  return writeE2EPolicy(
+    fixture.repository_id,
+    desired,
+    latest?.version ?? null,
+    csrfToken,
+  );
+}
+
+function writeE2EPolicy(
+  repositoryId: string,
+  policy: ReleasePolicy,
+  expectedVersion: number | null,
+  csrfToken: string,
+): Promise<PolicyRecord> {
+  const payload: PolicyUpsertPayload = {
+    ...policy,
+    discovered_checks: E2E_DISCOVERED_CHECKS,
+    expected_version: expectedVersion,
+  };
+  return putReleasePolicy(repositoryId, payload, csrfToken);
+}
+
+function policiesEqual(left: ReleasePolicy, right: ReleasePolicy): boolean {
+  return JSON.stringify(canonicalPolicy(left)) === JSON.stringify(canonicalPolicy(right));
+}
+
+function canonicalPolicy(policy: ReleasePolicy) {
+  return {
+    main_branch: policy.main_branch,
+    candidate_branch: policy.candidate_branch,
+    milestone_number: policy.milestone_number,
+    code_change_label: policy.code_change_label,
+    release_ops_label: policy.release_ops_label,
+    blocker_label: policy.blocker_label,
+    check_categories: Object.entries(policy.check_categories).sort(
+      ([left], [right]) => left.localeCompare(right),
+    ),
+    previous_milestone_number: policy.previous_milestone_number,
+    previous_release_branch: policy.previous_release_branch,
+  };
 }
 
 function aiExplanationState(mutation: {

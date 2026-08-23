@@ -36,6 +36,7 @@ from release_intelligence.ports.ai import (
     AIExplanationUnavailable,
     ExplanationAction,
     ExplanationGroup,
+    ExplanationInput,
     ExplanationMetadata,
 )
 from release_intelligence.ports.github import GitHubCheck, GitHubItem, GitHubItemKind
@@ -420,6 +421,36 @@ def test_validator_canonicalizes_all_rendered_prose_from_deterministic_facts() -
     assert validated.confidence == "HIGH"
     assert "READY;" not in validated.model_dump_json()
     assert "safe to ship" not in validated.model_dump_json()
+
+
+def test_validator_canonicalizes_a_ready_release_with_no_findings() -> None:
+    payload = ExplanationInput(
+        deterministic_status="READY",
+        release_name="Clean benchmark release",
+        source_fetched_at=NOW.isoformat(),
+        findings=(),
+        limitations=("Only deterministic findings are authoritative.",),
+    )
+    candidate = AIExplanation(
+        summary="Ship it.",
+        groups=(),
+        actions=(),
+        limitations=payload.limitations,
+        confidence="HIGH",
+        finding_ids=(),
+        evidence_ids=(),
+    )
+
+    validated = ExplanationValidator(payload).validate(candidate)
+
+    assert validated.summary == (
+        "0 supplied deterministic findings are organized below; "
+        "readiness remains READY."
+    )
+    assert validated.groups == ()
+    assert validated.actions == ()
+    assert validated.finding_ids == ()
+    assert validated.evidence_ids == ()
 
 
 def test_validator_rejects_multi_finding_group_with_partial_evidence() -> None:

@@ -2,25 +2,30 @@ import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
 
 import {
+  ApiError,
   bootstrapE2E,
   createAnalysis,
   getAnalysisRun,
   getAIExplanation,
   getCsrfBootstrap,
   getDemoAnalysis,
+  getReleasePolicy,
   putReleasePolicy,
   recordDecision,
 } from "../api/client";
 import { renderWithQueryClient } from "../test/render";
+import type { ReleasePolicy } from "../api/types";
 import { App } from "./App";
 
-vi.mock("../api/client", () => ({
+vi.mock("../api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/client")>()),
   bootstrapE2E: vi.fn(),
   createAnalysis: vi.fn(),
   getDemoAnalysis: vi.fn(),
   getAnalysisRun: vi.fn(),
   getCsrfBootstrap: vi.fn(),
   getAIExplanation: vi.fn(),
+  getReleasePolicy: vi.fn(),
   putReleasePolicy: vi.fn(),
   recordDecision: vi.fn(),
 }));
@@ -51,6 +56,59 @@ const NOT_READY_FIXTURE = {
     },
   ],
 } as const;
+
+const E2E_POLICY = {
+  main_branch: "main",
+  candidate_branch: "release/2026-08-10",
+  milestone_number: 7,
+  code_change_label: "code-change",
+  release_ops_label: "release-ops",
+  blocker_label: "release-blocker",
+  check_categories: {
+    "blocking-suite": "BLOCKING",
+    "advisory-tests": "ADVISORY",
+  },
+  previous_milestone_number: null,
+  previous_release_branch: null,
+} as const;
+
+function policyRecord(version: number, policy: ReleasePolicy = E2E_POLICY) {
+  return {
+    repository_id: "987654",
+    version,
+    policy,
+    created_at: "2026-08-16T20:00:00Z",
+  };
+}
+
+function arrangeE2EStart(runId = "10000000-0000-0000-0000-000000000001") {
+  vi.stubEnv("VITE_ENVIRONMENT", "e2e");
+  vi.mocked(bootstrapE2E).mockResolvedValue({
+    repository_id: "987654",
+    repository_full_name: "floppy522/ai-release-intelligence-demo",
+    milestone_number: 7,
+    candidate_ref: "release/2026-08-10",
+  });
+  vi.mocked(getCsrfBootstrap).mockResolvedValue({ csrf_token: "real-csrf-token" });
+  vi.mocked(createAnalysis).mockResolvedValue({ run_id: runId });
+  vi.mocked(getAnalysisRun).mockResolvedValue({
+    run_id: runId,
+    status: "NEEDS_DECISION",
+    release_name: "Milestone 7",
+    repository_id: "987654",
+    repository_full_name: "floppy522/ai-release-intelligence-demo",
+    source_fetched_at: "2026-08-16T20:00:00Z",
+    findings: [],
+  });
+}
+
+async function startE2EAnalysis() {
+  renderWithQueryClient(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "Use demo repository" }));
+  expect(await screen.findByLabelText("Milestone")).toHaveValue("7");
+  fireEvent.click(screen.getByRole("button", { name: "Run analysis" }));
+  await waitFor(() => expect(createAnalysis).toHaveBeenCalledOnce());
+}
 
 it("shows explicitly requested demo data with a visible fixture warning", async () => {
   window.history.replaceState(null, "", "/?demo=fixture");
@@ -156,74 +214,82 @@ it("loads a real analysis-run DTO and wires authoritative decision controls", as
   );
 });
 
-it("bootstraps the e2e session, persists policy, and starts a real analysis", async () => {
-  vi.stubEnv("VITE_ENVIRONMENT", "e2e");
-  const runId = "10000000-0000-0000-0000-000000000001";
-  vi.mocked(bootstrapE2E).mockResolvedValue({
-    repository_id: "987654",
-    repository_full_name: "floppy522/ai-release-intelligence-demo",
-    milestone_number: 7,
-    candidate_ref: "release/2026-08-10",
-  });
-  vi.mocked(getCsrfBootstrap).mockResolvedValue({ csrf_token: "real-csrf-token" });
-  vi.mocked(putReleasePolicy).mockResolvedValue({
-    repository_id: "987654",
-    version: 1,
-    policy: {
-      main_branch: "main",
-      candidate_branch: "release/2026-08-10",
-      milestone_number: 7,
-      code_change_label: "code-change",
-      release_ops_label: "release-ops",
-      blocker_label: "release-blocker",
-      check_categories: {
-        "blocking-suite": "BLOCKING",
-        "advisory-tests": "ADVISORY",
-      },
-      previous_milestone_number: null,
-      previous_release_branch: null,
+it("creates the first e2e policy before starting a real analysis", async () => {
+  arrangeE2EStart();
+  vi.mocked(getReleasePolicy).mockResolvedValue(null);
+  vi.mocked(putReleasePolicy).mockResolvedValue(policyRecord(1));
+
+  await startE2EAnalysis();
+
+  expect(getReleasePolicy).toHaveBeenCalledWith("987654");
+  expect(putReleasePolicy).toHaveBeenCalledWith(
+    "987654",
+    {
+      ...E2E_POLICY,
+      discovered_checks: ["blocking-suite", "advisory-tests"],
+      expected_version: null,
     },
-    created_at: "2026-08-16T20:00:00Z",
-  });
-  vi.mocked(createAnalysis).mockResolvedValue({ run_id: runId });
-  vi.mocked(getAnalysisRun).mockResolvedValue({
-    run_id: runId,
-    status: "NEEDS_DECISION",
-    release_name: "Milestone 7",
-    repository_id: "987654",
-    repository_full_name: "floppy522/ai-release-intelligence-demo",
-    source_fetched_at: "2026-08-16T20:00:00Z",
-    findings: [],
-  });
-
-  renderWithQueryClient(<App />);
-  fireEvent.click(screen.getByRole("button", { name: "Use demo repository" }));
-  expect(await screen.findByLabelText("Milestone")).toHaveValue("7");
-  expect(screen.getByLabelText("Release candidate")).toHaveValue(
-    "release/2026-08-10",
+    "real-csrf-token",
   );
-  fireEvent.click(screen.getByRole("button", { name: "Run analysis" }));
+  expect(await screen.findAllByText("NEEDS DECISION")).toHaveLength(2);
+});
 
-  await waitFor(() => expect(createAnalysis).toHaveBeenCalledWith(
+it("reuses an identical persisted policy on a repeated e2e start", async () => {
+  arrangeE2EStart();
+  vi.mocked(getReleasePolicy).mockResolvedValue(policyRecord(4));
+
+  await startE2EAnalysis();
+
+  expect(putReleasePolicy).not.toHaveBeenCalled();
+  expect(createAnalysis).toHaveBeenCalledWith(
     {
       repository_id: "987654",
       milestone_number: 7,
       candidate_ref: "release/2026-08-10",
     },
     "real-csrf-token",
-  ));
+  );
+});
+
+it("updates a changed e2e policy with the current expected version", async () => {
+  arrangeE2EStart();
+  vi.mocked(getReleasePolicy).mockResolvedValue(policyRecord(7, {
+    ...E2E_POLICY,
+    blocker_label: "old-release-blocker",
+  }));
+  vi.mocked(putReleasePolicy).mockResolvedValue(policyRecord(8));
+
+  await startE2EAnalysis();
+
   expect(putReleasePolicy).toHaveBeenCalledWith(
     "987654",
-    expect.objectContaining({
-      discovered_checks: ["blocking-suite", "advisory-tests"],
-      check_categories: {
-        "blocking-suite": "BLOCKING",
-        "advisory-tests": "ADVISORY",
-      },
-    }),
+    expect.objectContaining({ blocker_label: "release-blocker", expected_version: 7 }),
     "real-csrf-token",
   );
-  expect(await screen.findAllByText("NEEDS DECISION")).toHaveLength(2);
+});
+
+it("refetches and reconciles one stale e2e policy conflict", async () => {
+  arrangeE2EStart();
+  vi.mocked(getReleasePolicy)
+    .mockResolvedValueOnce(null)
+    .mockResolvedValueOnce(policyRecord(2, {
+      ...E2E_POLICY,
+      blocker_label: "concurrent-release-blocker",
+    }));
+  vi.mocked(putReleasePolicy)
+    .mockRejectedValueOnce(new ApiError(409))
+    .mockResolvedValueOnce(policyRecord(3));
+
+  await startE2EAnalysis();
+
+  expect(getReleasePolicy).toHaveBeenCalledTimes(2);
+  expect(putReleasePolicy).toHaveBeenNthCalledWith(
+    2,
+    "987654",
+    expect.objectContaining({ expected_version: 2 }),
+    "real-csrf-token",
+  );
+  expect(createAnalysis).toHaveBeenCalledOnce();
 });
 
 it.each(["bootstrap failure", "empty bootstrap token"] as const)("fails closed when %s prevents authenticated CSRF bootstrap", async (caseName) => {

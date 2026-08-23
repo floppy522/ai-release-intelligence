@@ -148,6 +148,36 @@ it("requests an optional explanation with same-origin credentials and CSRF", asy
   );
 });
 
+it("accepts a grounded READY explanation with no findings", async () => {
+  const payload = {
+    state: "available",
+    explanation: {
+      summary: "0 supplied deterministic findings are organized below; readiness remains READY.",
+      groups: [],
+      actions: [],
+      limitations: ["Only deterministic findings are authoritative."],
+      confidence: "HIGH",
+      finding_ids: [],
+      evidence_ids: [],
+    },
+    metadata: {
+      model: "gpt-5.6-2026-08-20",
+      latency_seconds: "0.100000",
+      input_tokens: 100,
+      output_tokens: 50,
+      cost: "0.001000",
+    },
+  } as const;
+  stubExplanation(payload);
+
+  await expect(
+    getAIExplanation(
+      "10000000-0000-0000-0000-000000000001",
+      "csrf-token",
+    ),
+  ).resolves.toEqual(payload);
+});
+
 it.each(["\u0000", "\u202e", "\ud800", "\u2028", "\u2029"])(
   "rejects unsafe Unicode category %s in AI content",
   async (unsafe) => {

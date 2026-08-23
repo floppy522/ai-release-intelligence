@@ -176,7 +176,6 @@ function isAIExplanationContent(value: unknown): value is AIExplanationContent {
   if (!isRecord(value)) return false;
   return isBoundedString(value.summary, 2_000) &&
     Array.isArray(value.groups) &&
-    value.groups.length > 0 &&
     value.groups.length <= 20 &&
     value.groups.every(
       (group) => isRecord(group) &&
@@ -196,8 +195,8 @@ function isAIExplanationContent(value: unknown): value is AIExplanationContent {
     ) &&
     isStringArray(value.limitations, 20, 2_000) &&
     ["LOW", "MEDIUM", "HIGH"].includes(String(value.confidence)) &&
-    isStringArray(value.finding_ids, 1_000, 255) &&
-    isStringArray(value.evidence_ids, 2_000, 255);
+    isStringArray(value.finding_ids, 1_000, 255, 0) &&
+    isStringArray(value.evidence_ids, 2_000, 255, 0);
 }
 
 function isAIExplanationMetadata(value: unknown): value is AIExplanationMetadata {
@@ -231,9 +230,10 @@ function isStringArray(
   value: unknown,
   maximumItems: number,
   maximumLength: number,
+  minimumItems = 1,
 ): value is string[] {
   return Array.isArray(value) &&
-    value.length > 0 &&
+    value.length >= minimumItems &&
     value.length <= maximumItems &&
     value.every((item) => isBoundedString(item, maximumLength));
 }

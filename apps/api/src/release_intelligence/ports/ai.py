@@ -125,7 +125,7 @@ class ExplanationInput(BaseModel):
     ]
     release_name: BoundedLabel
     source_fetched_at: BoundedLabel
-    findings: tuple[ExplanationFinding, ...] = Field(min_length=1, max_length=1_000)
+    findings: tuple[ExplanationFinding, ...] = Field(max_length=1_000)
     limitations: tuple[BoundedText, ...] = Field(min_length=1, max_length=20)
 
 
@@ -163,12 +163,12 @@ class AIExplanation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     summary: BoundedText
-    groups: tuple[ExplanationGroup, ...] = Field(min_length=1, max_length=20)
+    groups: tuple[ExplanationGroup, ...] = Field(max_length=20)
     actions: tuple[ExplanationAction, ...] = Field(max_length=100)
     limitations: tuple[BoundedText, ...] = Field(min_length=1, max_length=20)
     confidence: ExplanationConfidence
-    finding_ids: tuple[BoundedIdentifier, ...] = Field(min_length=1, max_length=1_000)
-    evidence_ids: tuple[BoundedIdentifier, ...] = Field(min_length=1, max_length=2_000)
+    finding_ids: tuple[BoundedIdentifier, ...] = Field(max_length=1_000)
+    evidence_ids: tuple[BoundedIdentifier, ...] = Field(max_length=2_000)
     _metadata: ExplanationMetadata | None = PrivateAttr(default=None)
 
     @property

@@ -22,4 +22,9 @@ test("fixture release moves from needs decision to ready", async ({ page }) => {
     "href",
     /^https:\/\/github\.com\/floppy522\/ai-release-intelligence-demo\/runs\/7001$/,
   );
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Use demo repository" }).click();
+  await page.getByRole("button", { name: "Run analysis" }).click();
+  await expect(page.getByText("NEEDS DECISION", { exact: true })).toBeVisible();
 });

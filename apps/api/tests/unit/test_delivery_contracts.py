@@ -27,7 +27,8 @@ def test_compose_isolated_stack_uses_healthy_non_writable_services() -> None:
     assert isinstance(postgres, dict)
     assert str(postgres["image"]).startswith("postgres:18-alpine")
     assert postgres["networks"] == ["database"]
-    assert postgres["volumes"] == ["postgres_test_data:/var/lib/postgresql/data"]
+    assert postgres["volumes"] == ["postgres_test_data:/var/lib/postgresql"]
+    assert "/var/lib/postgresql/data" not in str(postgres["volumes"])
     assert "healthcheck" in postgres
 
     api = services["api"]
@@ -47,6 +48,19 @@ def test_compose_isolated_stack_uses_healthy_non_writable_services() -> None:
     networks = document["networks"]
     assert networks["database"]["internal"] is True
     assert set(document["volumes"]) == {"postgres_test_data"}
+
+    production = _yaml("compose.yaml")
+    production_services = production["services"]
+    assert isinstance(production_services, dict)
+    production_postgres = production_services["postgres"]
+    assert isinstance(production_postgres, dict)
+    assert production_postgres["volumes"] == ["postgres_data:/var/lib/postgresql"]
+    assert "/var/lib/postgresql/data" not in str(production_postgres["volumes"])
+    assert set(production["volumes"]) == {"postgres_data"}
+    for name, service in production_services.items():
+        assert isinstance(service, dict)
+        if name != "postgres":
+            assert "volumes" not in service
 
 
 def test_dockerfiles_are_multistage_non_root_and_exec_form() -> None:
@@ -114,7 +128,12 @@ def test_live_workflows_are_manual_secret_guarded_and_upload_safe_outputs() -> N
     assert "gpt-5.6" in ai_text
     assert "44" in ai_text
     assert "aggregate" in ai_text.lower()
+    assert "release_intelligence.benchmark.live_ai" in ai_text
+    assert "responses.create" not in ai_text
+    assert "python - <<" not in ai_text
+    assert "deterministic-benchmark.json" not in ai_text
     assert "ai-claims" not in ai_text
+    assert "unsupported_claim_rate" not in ai_text
 
 
 def test_smoke_script_checks_health_api_and_web_without_verbose_curl(

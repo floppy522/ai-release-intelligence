@@ -22,7 +22,7 @@ services:
       retries: 12
     networks: [database]
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
     security_opt: ["no-new-privileges:true"]
 
   migrate:
