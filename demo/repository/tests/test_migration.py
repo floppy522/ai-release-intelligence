@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from scripts.migrate import MARKER, migrate
@@ -14,7 +15,7 @@ class FictionalMigrationTests(unittest.TestCase):
             database = Path(temporary_directory) / "fictional.sqlite3"
             migrate(str(database))
             migrate(str(database))
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 rows = connection.execute(
                     "SELECT name FROM release_migration_markers"
                 ).fetchall()

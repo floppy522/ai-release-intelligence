@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 MARKER = "fictional-payment-schema-v1"
@@ -16,7 +17,7 @@ def migrate(database: str) -> None:
     if database != ":memory:":
         target = Path(database)
         target.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS release_migration_markers (
