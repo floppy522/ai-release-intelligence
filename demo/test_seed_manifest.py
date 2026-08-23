@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "demo" / "seed_manifest.yaml"
 SEED_SCRIPT = ROOT / "demo" / "seed_demo_repo.sh"
 DEMO_REPOSITORY = ROOT / "demo" / "repository"
+STATE_MACHINE = ROOT / "demo" / "seed_state.py"
 
 
 @pytest.fixture
@@ -356,3 +357,16 @@ def test_seed_waits_for_exact_successful_migration_check_before_ops_edit() -> No
     assert "check-runs" in text
     assert "Migration evidence" in text
     assert "migration check" in text
+
+
+def test_seed_wrapper_delegates_to_typed_argv_state_machine() -> None:
+    """Stateful convergence must not depend on shell parsing or grep fakes."""
+
+    assert STATE_MACHINE.is_file()
+    wrapper = SEED_SCRIPT.read_text(encoding="utf-8")
+    implementation = STATE_MACHINE.read_text(encoding="utf-8")
+    assert "uv run --project" in wrapper
+    assert "seed_state.py" in wrapper
+    assert "subprocess.run" in implementation
+    assert "shell=False" in implementation
+    assert "class SeedClient" in implementation

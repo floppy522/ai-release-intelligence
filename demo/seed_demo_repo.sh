@@ -4,6 +4,15 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# The public entrypoint is a locked-UV typed adapter.  This guarded branch is
+# the implementation process it launches; it keeps legacy invocation stable
+# while preventing untrusted manifest values from becoming shell syntax.
+if [ "${ARI_SEED_IMPLEMENTATION:-}" != '1' ]; then
+  script_directory="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+  project_root="$(CDPATH='' cd -- "${script_directory}/.." && pwd -P)"
+  exec uv run --project "${project_root}/apps/api" python "${script_directory}/seed_state.py" "$@"
+fi
+
 readonly REQUIRED_OWNER='floppy522'
 readonly REQUIRED_REPOSITORY='ai-release-intelligence-demo'
 readonly REQUIRED_TARGET="${REQUIRED_OWNER}/${REQUIRED_REPOSITORY}"
