@@ -1,0 +1,15 @@
+name: Fictional code change
+description: Create fictional code-change evidence for the release demo.
+title: "[ari-demo:v1:code-change] "
+labels: [code-change]
+body:
+  - type: markdown
+    attributes:
+      value: This template is for fictional release-demo evidence only.
+  - type: textarea
+    id: change-summary
+    attributes:
+      label: Fictional change summary
+      description: Do not enter real payment, customer, credential, or incident data.
+    validations:
+      required: true

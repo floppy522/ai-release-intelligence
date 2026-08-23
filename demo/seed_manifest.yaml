@@ -1,0 +1,102 @@
+# Fictional, public-safe release evidence for the ai-release-intelligence demo.
+# It intentionally contains no customer, payment, credential, or incident data.
+schema_version: 1
+repository:
+  owner: floppy522
+  name: ai-release-intelligence-demo
+  visibility: public
+milestone: Release 2026.08.10
+milestone_number: 7
+previous_milestone: Release 2026.08.03
+previous_milestone_number: 6
+main_branch: main
+candidate_branch: release/2026-08-10
+previous_release_branch: release/2026-08-03
+labels:
+  - code-change
+  - release-ops
+  - release-blocker
+  - migration-required
+checks:
+  - name: blocking-suite
+    category: BLOCKING
+    expected_conclusion: success
+  - name: advisory-synthetic
+    category: ADVISORY
+    expected_conclusion: failure
+issues:
+  - key: previous-code
+    marker: ari-demo:v1:previous-code
+    title: "[ari-demo:v1:previous-code] Fictional payment retry ledger adjustment"
+    milestone: Release 2026.08.03
+    labels: [code-change, migration-required]
+    closed: false
+    body: |
+      <!-- ari-demo:v1:previous-code -->
+      This fictional payment-service change adjusts retry-ledger bookkeeping.
+      It exists solely to demonstrate a prior-release back-merge relationship.
+  - key: current-code
+    marker: ari-demo:v1:current-code
+    title: "[ari-demo:v1:current-code] Fictional payment settlement migration"
+    milestone: Release 2026.08.10
+    labels: [code-change, migration-required]
+    closed: false
+    body: |
+      <!-- ari-demo:v1:current-code -->
+      This fictional payment-service change adds an idempotent local migration marker.
+      Its migration proof is the successful blocking-suite check on the release branch.
+  - key: release-operations
+    marker: ari-demo:v1:release-operations
+    title: "[ari-demo:v1:release-operations] Fictional release operations checklist"
+    milestone: Release 2026.08.10
+    labels: [release-ops]
+    closed: false
+    assignee: release-demo-owner
+    body: |
+      <!-- ari-demo:v1:release-operations -->
+      ## Before release
+      Confirm the fictional migration marker test is green in blocking-suite.
+
+      ## During release
+      Observe the synthetic workflow results and record the advisory decision.
+
+      ## After release
+      Verify the fictional marker remains present after a repeat migration run.
+  - key: resolved-blocker
+    marker: ari-demo:v1:resolved-blocker
+    title: "[ari-demo:v1:resolved-blocker] Fictional blocker resolved before cut"
+    milestone: Release 2026.08.10
+    labels: [release-blocker]
+    closed: true
+    body: |
+      <!-- ari-demo:v1:resolved-blocker -->
+      Fictional-only blocker evidence. It is closed so it does not block the demo release.
+pull_requests:
+  - marker: ari-demo:v1:previous-release
+    title: "[ari-demo:v1:previous-release] Fictional prior release change"
+    issue_key: previous-code
+    head: fixture/previous-release-demo
+    base: release/2026-08-03
+    milestone: Release 2026.08.03
+    merged: true
+  - marker: ari-demo:v1:previous-main
+    title: "[ari-demo:v1:previous-main] Fictional prior release back-merge"
+    issue_key: previous-code
+    head: fixture/previous-main-demo
+    base: main
+    milestone: Release 2026.08.03
+    merged: true
+  - marker: ari-demo:v1:current-main
+    title: "[ari-demo:v1:current-main] Fictional current release change"
+    issue_key: current-code
+    head: fixture/current-main-demo
+    base: main
+    milestone: Release 2026.08.10
+    merged: true
+demo_states:
+  - name: advisory-awaiting-decision
+    expected_status: NEEDS_DECISION
+    rationale: The blocking-suite check passes while advisory-synthetic intentionally fails.
+  - name: advisory-risk-accepted
+    expected_status: READY
+    rationale: Recording an accepted decision for the unchanged advisory check resolves the only decision-required finding.

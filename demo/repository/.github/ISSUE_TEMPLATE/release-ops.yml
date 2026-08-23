@@ -1,0 +1,26 @@
+name: Fictional release operations
+description: Record fictional release-operation evidence for the demo.
+title: "[ari-demo:v1:release-operations] "
+labels: [release-ops]
+body:
+  - type: markdown
+    attributes:
+      value: This template is for fictional release-demo evidence only.
+  - type: textarea
+    id: before-release
+    attributes:
+      label: Before release
+    validations:
+      required: true
+  - type: textarea
+    id: during-release
+    attributes:
+      label: During release
+    validations:
+      required: true
+  - type: textarea
+    id: after-release
+    attributes:
+      label: After release
+    validations:
+      required: true
