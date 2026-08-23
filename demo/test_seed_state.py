@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from hashlib import sha1
 from pathlib import Path
@@ -767,6 +768,127 @@ def test_operations_body_is_byte_preserved_until_all_gates_pass(failure: str) ->
     assert fake.mutation_log == []
 
 
+def _candidate_check(
+    candidate_sha: str,
+    *,
+    name: str,
+    conclusion: str | None,
+    run_number: int,
+    status: str = "completed",
+    target: str = TARGET,
+    head_sha: str | None = None,
+) -> Any:
+    return seed_state.CheckRunState(
+        name=name,
+        status=status,
+        conclusion=conclusion,
+        html_url=f"https://github.com/{target}/runs/{run_number}",
+        head_sha=candidate_sha if head_sha is None else head_sha,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_advisory",
+        "duplicate_advisory",
+        "advisory_pending",
+        "advisory_success",
+        "advisory_wrong_sha",
+        "advisory_wrong_repository",
+        "unknown_extra",
+    ],
+)
+def test_migration_gate_requires_exact_completed_manifest_check_pair(
+    mutation: str,
+) -> None:
+    """Migration evidence is valid only for the exact blocking/advisory state."""
+
+    candidate_sha = "a" * 40
+    blocking = _candidate_check(
+        candidate_sha,
+        name="blocking-suite",
+        conclusion="success",
+        run_number=7001,
+    )
+    advisory = _candidate_check(
+        candidate_sha,
+        name="advisory-synthetic",
+        conclusion="failure",
+        run_number=7002,
+    )
+    runs = [blocking, advisory]
+    if mutation == "missing_advisory":
+        runs = [blocking]
+    elif mutation == "duplicate_advisory":
+        runs.append(
+            replace(advisory, html_url=f"https://github.com/{TARGET}/runs/7003")
+        )
+    elif mutation == "advisory_pending":
+        runs[1] = replace(advisory, status="in_progress", conclusion=None)
+    elif mutation == "advisory_success":
+        runs[1] = replace(advisory, conclusion="success")
+    elif mutation == "advisory_wrong_sha":
+        runs[1] = replace(advisory, head_sha="b" * 40)
+    elif mutation == "advisory_wrong_repository":
+        runs[1] = replace(
+            advisory,
+            html_url="https://github.com/attacker/other/runs/7002",
+        )
+    else:
+        runs.append(
+            _candidate_check(
+                candidate_sha,
+                name="unclassified-extra",
+                conclusion="success",
+                run_number=7004,
+            )
+        )
+    fake = InMemorySeedClient()
+    fake.checks[candidate_sha] = tuple(runs)
+
+    with pytest.raises(seed_state.SeedError):
+        seed_state._wait_for_migration_check(
+            fake,
+            TARGET,
+            candidate_sha,
+            attempts=1,
+            wait_seconds=0,
+        )
+
+
+def test_migration_gate_accepts_exact_completed_manifest_check_pair() -> None:
+    """The canonical pair returns only the blocking evidence URL."""
+
+    candidate_sha = "a" * 40
+    fake = InMemorySeedClient()
+    fake.checks[candidate_sha] = (
+        _candidate_check(
+            candidate_sha,
+            name="blocking-suite",
+            conclusion="success",
+            run_number=7001,
+        ),
+        _candidate_check(
+            candidate_sha,
+            name="advisory-synthetic",
+            conclusion="failure",
+            run_number=7002,
+        ),
+    )
+
+    assert (
+        seed_state._wait_for_migration_check(
+            fake,
+            TARGET,
+            candidate_sha,
+            attempts=1,
+            wait_seconds=0,
+        )
+        == f"https://github.com/{TARGET}/runs/7001"
+    )
+
+
 @pytest.mark.parametrize("bypass_value", [None, "1"])
 def test_wrapper_is_locked_and_cannot_reenter_a_shell_implementation(
     tmp_path: Path, bypass_value: str | None
@@ -852,6 +974,17 @@ class RecordingRunner:
         return seed_state.CommandOutput(returncode=returncode, stdout=stdout)
 
 
+def _included_gh_response(status: int, body: object) -> str:
+    reason = {200: "OK", 404: "Not Found"}.get(status, "Error")
+    return (
+        f"HTTP/2.0 {status} {reason}\r\n"
+        "content-type: application/json; charset=utf-8\r\n"
+        "x-github-request-id: recorded-contract\r\n"
+        "\r\n"
+        f"{json.dumps(body)}"
+    )
+
+
 def _issue_response(
     *, title: str, body: str, labels: tuple[str, ...], assignees: tuple[str, ...]
 ) -> str:
@@ -921,6 +1054,7 @@ def test_production_adapter_emits_exact_paginated_search_query() -> None:
             json.dumps(
                 {
                     "total_count": 1,
+                    "incomplete_results": False,
                     "items": [
                         {
                             "number": 23,
@@ -952,83 +1086,287 @@ def test_production_adapter_emits_exact_paginated_search_query() -> None:
     )
 
 
-def test_subprocess_runner_uses_argv_shell_false_and_bounded_timeout(
+@pytest.mark.parametrize("kind", ["issue", "pr"])
+def test_production_search_rejects_incomplete_results(kind: str) -> None:
+    """A partial exact-marker page cannot prove absence or uniqueness."""
+
+    marker = f"ari-demo:v1:incomplete-{kind}"
+    runner = RecordingRunner(
+        (
+            0,
+            json.dumps(
+                {
+                    "total_count": 0,
+                    "incomplete_results": True,
+                    "items": [],
+                }
+            ),
+        )
+    )
+    client = seed_state.GitHubGitSeedClient(runner=runner)
+
+    with pytest.raises(seed_state.SeedError, match="incomplete"):
+        client.search_marker(TARGET, marker, kind=kind, page=1, per_page=100)
+
+
+def test_recorded_gh_label_reconciliation_normalizes_null_description() -> None:
+    """GitHub's nullable description must converge through exact GET/PATCH argv."""
+
+    existing = {
+        "name": "code-change",
+        "color": "1d76db",
+        "description": None,
+    }
+    runner = RecordingRunner(
+        (0, _included_gh_response(200, existing)),
+        (0, ""),
+    )
+    client = seed_state.GitHubGitSeedClient(runner=runner)
+    wanted = seed_state.LabelState(
+        name="code-change",
+        color="1d76db",
+        description="Fictional release code change",
+    )
+
+    client.upsert_label(TARGET, wanted)
+
+    assert [call["argv"] for call in runner.calls] == [
+        (
+            "gh",
+            "api",
+            "--include",
+            "--method",
+            "GET",
+            f"repos/{TARGET}/labels/code-change",
+        ),
+        (
+            "gh",
+            "api",
+            "--method",
+            "PATCH",
+            f"repos/{TARGET}/labels/code-change",
+            "-f",
+            "new_name=code-change",
+            "-f",
+            "color=1d76db",
+            "-f",
+            "description=Fictional release code change",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("resource", ["label", "ref"])
+def test_optional_api_reads_accept_only_structured_http_404(resource: str) -> None:
+    """A recorded HTTP 404 is absence; a generic gh exit one is not."""
+
+    endpoint = (
+        f"repos/{TARGET}/labels/code-change"
+        if resource == "label"
+        else f"repos/{TARGET}/git/ref/heads/release%2F2026-08-10"
+    )
+    for output, expected_absent in (
+        (_included_gh_response(404, {"message": "Not Found"}), True),
+        (_included_gh_response(401, {"message": "Bad credentials"}), False),
+        (_included_gh_response(403, {"message": "rate limited"}), False),
+        (_included_gh_response(429, {"message": "rate limited"}), False),
+        (_included_gh_response(500, {"message": "server error"}), False),
+        ("", False),
+    ):
+        runner = RecordingRunner((1, output))
+        client = seed_state.GitHubGitSeedClient(runner=runner)
+        if expected_absent:
+            result = (
+                client.get_label(TARGET, "code-change")
+                if resource == "label"
+                else client.get_ref(TARGET, "release/2026-08-10")
+            )
+            assert result is None
+        else:
+            with pytest.raises(seed_state.SeedError):
+                if resource == "label":
+                    client.get_label(TARGET, "code-change")
+                else:
+                    client.get_ref(TARGET, "release/2026-08-10")
+        assert runner.calls[0]["argv"] == (
+            "gh",
+            "api",
+            "--include",
+            "--method",
+            "GET",
+            endpoint,
+        )
+
+
+def test_repository_probe_accepts_only_structured_http_404(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repository creation is permitted only after a provable REST 404."""
+
+    bootstrap_sha = "a" * 40
+
+    def fixed_bootstrap(*args: Any, **kwargs: Any) -> str:
+        return bootstrap_sha
+
+    monkeypatch.setattr(seed_state, "build_bootstrap_repository", fixed_bootstrap)
+    runner = RecordingRunner(
+        (1, _included_gh_response(404, {"message": "Not Found"})),
+        (0, ""),
+    )
+    client = seed_state.GitHubGitSeedClient(runner=runner)
+
+    assert (
+        client.ensure_repository(TARGET, tmp_path, seed_state.BOOTSTRAP_SPEC)
+        == bootstrap_sha
+    )
+    assert runner.calls[0]["argv"] == (
+        "gh",
+        "api",
+        "--include",
+        "--method",
+        "GET",
+        f"repos/{TARGET}",
+    )
+    assert runner.calls[1]["argv"][:4] == ("gh", "repo", "create", TARGET)
+
+    generic = RecordingRunner((1, ""), (0, ""))
+    with pytest.raises(seed_state.SeedError):
+        seed_state.GitHubGitSeedClient(runner=generic).ensure_repository(
+            TARGET, tmp_path, seed_state.BOOTSTRAP_SPEC
+        )
+    assert len(generic.calls) == 1
+
+
+def test_subprocess_runner_is_noninteractive_and_pins_github_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Removing shell=False or the timeout would expose the production boundary."""
+    """Ambient host/prompt settings and stdin cannot alter command behavior."""
 
     observed: dict[str, Any] = {}
+    real_popen = subprocess.Popen
 
-    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+    def recording_popen(argv: list[str], **kwargs: Any) -> Any:
         observed["argv"] = argv
         observed.update(kwargs)
-        return subprocess.CompletedProcess(argv, 0, stdout=b"ok", stderr=b"")
+        return real_popen(argv, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", recording_popen)
+    monkeypatch.setenv("GH_HOST", "attacker.invalid")
+    monkeypatch.setenv("GH_PROMPT_DISABLED", "0")
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
     runner = seed_state.SubprocessRunner(
         default_timeout_seconds=7, max_output_bytes=128
     )
     literal = "a; $(touch never)\nsecond line"
-    result = runner.run(("gh", "api", "endpoint", "-f", f"body={literal}"))
+    result = runner.run(
+        (sys.executable, "-c", "import sys; sys.stdout.write('ok')", literal),
+        environment={"GH_HOST": "also-attacker.invalid"},
+    )
     assert result.stdout == "ok"
     assert observed["argv"] == [
-        "gh",
-        "api",
-        "endpoint",
-        "-f",
-        f"body={literal}",
+        sys.executable,
+        "-c",
+        "import sys; sys.stdout.write('ok')",
+        literal,
     ]
     assert observed["shell"] is False
-    assert observed["timeout"] == 7
-    assert observed["capture_output"] is True
-    assert observed["check"] is False
+    assert observed["stdin"] is subprocess.DEVNULL
+    assert observed["stdout"] is subprocess.PIPE
+    assert observed["stderr"] is subprocess.PIPE
+    assert observed["start_new_session"] is True
+    assert observed["env"]["GH_HOST"] == "github.com"
+    assert observed["env"]["GH_PROMPT_DISABLED"] == "1"
+    assert observed["env"]["GIT_TERMINAL_PROMPT"] == "0"
 
 
-def test_subprocess_runner_timeout_and_nonzero_errors_are_constant_safe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_subprocess_runner_timeout_and_nonzero_errors_are_constant_safe() -> None:
     """Credential-bearing stderr must never be copied into a raised error."""
 
     runner = seed_state.SubprocessRunner(
         default_timeout_seconds=1, max_output_bytes=128
     )
 
-    def time_out(*args: Any, **kwargs: Any) -> Any:
-        raise subprocess.TimeoutExpired(args[0], 1, output=b"token=timeout-secret")
-
-    monkeypatch.setattr(subprocess, "run", time_out)
     with pytest.raises(seed_state.SeedError) as timeout_error:
-        runner.run(("gh", "auth", "status"))
+        runner.run(
+            (
+                sys.executable,
+                "-c",
+                (
+                    "import sys,time; "
+                    "sys.stderr.write('token=timeout-secret'); "
+                    "sys.stderr.flush(); time.sleep(2)"
+                ),
+            ),
+            timeout_seconds=0.05,
+        )
     assert str(timeout_error.value) == "external command timed out"
     assert "secret" not in str(timeout_error.value)
 
-    def fail(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(
-            argv, 23, stdout=b"", stderr=b"Authorization: nonzero-secret"
-        )
-
-    monkeypatch.setattr(subprocess, "run", fail)
     with pytest.raises(seed_state.SeedError) as nonzero_error:
-        runner.run(("gh", "api", "endpoint"))
+        runner.run(
+            (
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    "sys.stderr.write('Authorization: nonzero-secret'); "
+                    "raise SystemExit(23)"
+                ),
+            )
+        )
     assert str(nonzero_error.value) == "external command failed"
     assert "secret" not in str(nonzero_error.value)
 
 
 def test_subprocess_runner_rejects_output_over_its_fixed_cap(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """A gh response larger than the configured cap must fail closed."""
+    """The cap kills a still-writing process before post-output side effects."""
 
-    def oversized(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(argv, 0, stdout=b"x" * 129, stderr=b"")
-
-    monkeypatch.setattr(subprocess, "run", oversized)
-    runner = seed_state.SubprocessRunner(
-        default_timeout_seconds=1, max_output_bytes=128
+    sentinel = tmp_path / "output-cap-was-post-hoc"
+    child = (
+        "import os,signal,sys; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "[os.write(sys.stdout.fileno(), b'x' * 1024) for _ in range(4096)]; "
+        f"open({str(sentinel)!r}, 'w').write('unsafe')"
     )
+    runner = seed_state.SubprocessRunner(
+        default_timeout_seconds=3, max_output_bytes=4096
+    )
+    started = time.monotonic()
     with pytest.raises(seed_state.SeedError) as caught:
-        runner.run(("gh", "api", "endpoint"))
+        runner.run((sys.executable, "-c", child))
     assert str(caught.value) == "external command output exceeded limit"
+    assert time.monotonic() - started < 2
+    assert not sentinel.exists()
+
+
+def test_subprocess_runner_timeout_terminates_descendant_process_group(
+    tmp_path: Path,
+) -> None:
+    """A short-lived command parent must not leave a pipe-holding child alive."""
+
+    sentinel = tmp_path / "descendant-survived-timeout"
+    descendant = (
+        "import pathlib,sys,time; time.sleep(0.25); "
+        "pathlib.Path(sys.argv[1]).write_text('unsafe', encoding='utf-8')"
+    )
+    parent = (
+        "import subprocess,sys; "
+        "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])"
+    )
+    runner = seed_state.SubprocessRunner(
+        default_timeout_seconds=1,
+        max_output_bytes=4096,
+        termination_grace_seconds=0.05,
+    )
+
+    with pytest.raises(seed_state.SeedError, match="timed out"):
+        runner.run(
+            (sys.executable, "-c", parent, descendant, str(sentinel)),
+            timeout_seconds=0.05,
+        )
+    time.sleep(0.35)
+    assert not sentinel.exists()
 
 
 def test_production_adapter_rejects_malformed_json_with_constant_error() -> None:

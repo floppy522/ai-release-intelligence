@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import selectors
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -36,6 +39,8 @@ PAGE_SIZE = 100
 MAX_PAGES = 10
 MAX_RECORDS = 200
 MAX_MANIFEST_BYTES = 128 * 1024
+MAX_COMMAND_TIMEOUT_SECONDS = 120
+MAX_COMMAND_OUTPUT_BYTES = 16 * 1024 * 1024
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 MARKER_PATTERN = re.compile(r"^ari-demo:v1:[a-z0-9-]{1,48}$")
 KEY_PATTERN = re.compile(r"^[a-z0-9-]{1,48}$")
@@ -509,10 +514,151 @@ class CommandRunner(Protocol):
     ) -> CommandOutput: ...
 
 
+class _CommandTimedOut(Exception):
+    pass
+
+
+class _CommandOutputExceeded(Exception):
+    pass
+
+
 @dataclass(frozen=True)
 class SubprocessRunner:
     default_timeout_seconds: float = 30
     max_output_bytes: int = 1024 * 1024
+    termination_grace_seconds: float = 0.5
+
+    def __post_init__(self) -> None:
+        if (
+            not math.isfinite(self.default_timeout_seconds)
+            or not 0 < self.default_timeout_seconds <= MAX_COMMAND_TIMEOUT_SECONDS
+            or not 1 <= self.max_output_bytes <= MAX_COMMAND_OUTPUT_BYTES
+            or not math.isfinite(self.termination_grace_seconds)
+            or not 0 < self.termination_grace_seconds <= 5
+        ):
+            raise ValueError("subprocess runner bounds are invalid")
+
+    @staticmethod
+    def _environment(overrides: dict[str, str] | None) -> dict[str, str]:
+        environment = dict(os.environ)
+        if overrides is not None:
+            environment.update(overrides)
+        environment.update(
+            {
+                "GCM_INTERACTIVE": "Never",
+                "GH_HOST": "github.com",
+                "GH_PAGER": "cat",
+                "GH_PROMPT_DISABLED": "1",
+                "GIT_PAGER": "cat",
+                "GIT_TERMINAL_PROMPT": "0",
+            }
+        )
+        return environment
+
+    @staticmethod
+    def _send_signal(process: subprocess.Popen[bytes], requested: int) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, requested)
+            elif process.poll() is not None:
+                return
+            elif requested == signal.SIGTERM:
+                process.terminate()
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            if process.poll() is None:
+                raise SeedError("external command could not be terminated") from error
+
+    def _stop(self, process: subprocess.Popen[bytes]) -> None:
+        if os.name == "posix":
+            self._send_signal(process, signal.SIGTERM)
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=self.termination_grace_seconds)
+                except subprocess.TimeoutExpired:
+                    pass
+            else:
+                process.wait()
+            self._send_signal(process, signal.SIGKILL)
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=self.termination_grace_seconds)
+                except subprocess.TimeoutExpired as error:
+                    raise SeedError(
+                        "external command could not be terminated"
+                    ) from error
+            return
+        if process.poll() is not None:
+            process.wait()
+            return
+        self._send_signal(process, signal.SIGTERM)
+        try:
+            process.wait(timeout=self.termination_grace_seconds)
+            return
+        except subprocess.TimeoutExpired:
+            self._send_signal(process, signal.SIGKILL)
+        try:
+            process.wait(timeout=self.termination_grace_seconds)
+        except subprocess.TimeoutExpired as error:
+            raise SeedError("external command could not be terminated") from error
+
+    def _collect(
+        self, process: subprocess.Popen[bytes], timeout: float
+    ) -> tuple[bytes, bytes]:
+        stdout = process.stdout
+        stderr = process.stderr
+        if stdout is None or stderr is None:
+            raise SeedError("external command returned invalid output")
+        buffers = {stdout.fileno(): bytearray(), stderr.fileno(): bytearray()}
+        selector = selectors.DefaultSelector()
+        selector.register(stdout, selectors.EVENT_READ)
+        selector.register(stderr, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout
+        try:
+            while selector.get_map():
+                remaining_time = deadline - time.monotonic()
+                if remaining_time <= 0:
+                    raise _CommandTimedOut
+                events = selector.select(timeout=min(remaining_time, 0.05))
+                for key, _ in events:
+                    total = sum(len(buffer) for buffer in buffers.values())
+                    remaining_output = self.max_output_bytes - total
+                    try:
+                        chunk = os.read(
+                            key.fd,
+                            min(64 * 1024, remaining_output + 1),
+                        )
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    buffer = buffers[key.fd]
+                    buffer.extend(chunk[:remaining_output])
+                    if len(chunk) > remaining_output:
+                        raise _CommandOutputExceeded
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
+                raise _CommandTimedOut
+            try:
+                process.wait(timeout=remaining_time)
+            except subprocess.TimeoutExpired as error:
+                raise _CommandTimedOut from error
+        finally:
+            selector.close()
+        return bytes(buffers[stdout.fileno()]), bytes(buffers[stderr.fileno()])
+
+    @staticmethod
+    def _close_pipes(process: subprocess.Popen[bytes]) -> None:
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
 
     def run(
         self,
@@ -526,36 +672,46 @@ class SubprocessRunner:
         timeout = (
             self.default_timeout_seconds if timeout_seconds is None else timeout_seconds
         )
-        process_environment = (
-            None if environment is None else dict(os.environ) | environment
-        )
+        if not math.isfinite(timeout) or not 0 < timeout <= MAX_COMMAND_TIMEOUT_SECONDS:
+            raise SeedError("external command timeout is invalid")
+        process: subprocess.Popen[bytes] | None = None
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 list(argv),
                 cwd=None if cwd is None else str(cwd),
-                env=process_environment,
+                env=self._environment(environment),
                 shell=False,
-                timeout=timeout,
-                capture_output=True,
-                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+                bufsize=0,
             )
-        except subprocess.TimeoutExpired as error:
-            raise SeedError("external command timed out") from error
-        except OSError as error:
+            try:
+                stdout, _stderr = self._collect(process, timeout)
+            except _CommandTimedOut as error:
+                self._stop(process)
+                raise SeedError("external command timed out") from error
+            except _CommandOutputExceeded as error:
+                self._stop(process)
+                raise SeedError("external command output exceeded limit") from error
+            except OSError as error:
+                self._stop(process)
+                raise SeedError("external command failed") from error
+        except (OSError, ValueError) as error:
             raise SeedError("external command is unavailable") from error
-        stdout = completed.stdout
-        stderr = completed.stderr
-        if not isinstance(stdout, bytes) or not isinstance(stderr, bytes):
-            raise SeedError("external command returned invalid output")
-        if len(stdout) > self.max_output_bytes or len(stderr) > self.max_output_bytes:
-            raise SeedError("external command output exceeded limit")
-        if completed.returncode not in allowed_returncodes:
+        finally:
+            if process is not None:
+                if process.poll() is None:
+                    self._stop(process)
+                self._close_pipes(process)
+        if process.returncode not in allowed_returncodes:
             raise SeedError("external command failed")
         try:
             decoded = stdout.decode("utf-8")
         except UnicodeDecodeError as error:
             raise SeedError("external command returned invalid output") from error
-        return CommandOutput(returncode=completed.returncode, stdout=decoded)
+        return CommandOutput(returncode=process.returncode, stdout=decoded)
 
 
 def build_bootstrap_repository(
@@ -718,6 +874,25 @@ def _json_document(output: str) -> object:
         raise SeedError("GitHub returned invalid data") from error
 
 
+HTTP_STATUS_LINE_PATTERN = re.compile(
+    r"^HTTP/(?:1\.0|1\.1|2(?:\.0)?) ([1-5][0-9]{2})(?: [^\r\n]*)?$"
+)
+
+
+def _included_http_response(output: str) -> tuple[int, str]:
+    separator = "\r\n\r\n" if "\r\n\r\n" in output else "\n\n"
+    if separator not in output:
+        raise SeedError("GitHub request status is unavailable")
+    headers, body = output.split(separator, 1)
+    lines = headers.splitlines()
+    if not lines:
+        raise SeedError("GitHub request status is unavailable")
+    match = HTTP_STATUS_LINE_PATTERN.fullmatch(lines[0])
+    if match is None or any(line.startswith("HTTP/") for line in lines[1:]):
+        raise SeedError("GitHub request status is unavailable")
+    return int(match.group(1)), body
+
+
 @dataclass(frozen=True)
 class GitHubGitSeedClient:
     runner: CommandRunner
@@ -738,6 +913,20 @@ class GitHubGitSeedClient:
     def _json(self, argv: Sequence[str]) -> object:
         return _json_document(self._run(argv).stdout)
 
+    def _read_optional_json(self, endpoint: str) -> object | None:
+        output = self._run(
+            ("gh", "api", "--include", "--method", "GET", endpoint),
+            allowed_returncodes=frozenset({0, 1}),
+        )
+        status, body = _included_http_response(output.stdout)
+        if output.returncode == 1:
+            if status == 404:
+                return None
+            raise SeedError("GitHub request failed")
+        if status != 200:
+            raise SeedError("GitHub request failed")
+        return _json_document(body)
+
     def authenticate(self) -> None:
         self._run(("gh", "auth", "status", "--hostname", "github.com"))
 
@@ -749,11 +938,8 @@ class GitHubGitSeedClient:
             bootstrap_sha = build_bootstrap_repository(
                 template, repository, spec=spec, runner=self.runner
             )
-            observed = self._run(
-                ("gh", "repo", "view", target, "--json", "nameWithOwner"),
-                allowed_returncodes=frozenset({0, 1}),
-            )
-            if observed.returncode != 0:
+            observed = self._read_optional_json(f"repos/{target}")
+            if observed is None:
                 self._run(
                     (
                         "gh",
@@ -849,17 +1035,19 @@ class GitHubGitSeedClient:
         )
 
     def get_label(self, target: str, name: str) -> LabelState | None:
-        output = self._run(
-            ("gh", "api", f"repos/{target}/labels/{quote(name, safe='')}"),
-            allowed_returncodes=frozenset({0, 1}),
+        document = self._read_optional_json(
+            f"repos/{target}/labels/{quote(name, safe='')}"
         )
-        if output.returncode != 0:
+        if document is None:
             return None
-        payload = _mapping(_json_document(output.stdout))
+        payload = _mapping(document)
+        description = payload.get("description")
         return LabelState(
             name=_string(payload.get("name")),
             color=_string(payload.get("color")),
-            description=_string(payload.get("description"), allow_empty=True),
+            description=(
+                "" if description is None else _string(description, allow_empty=True)
+            ),
         )
 
     def upsert_label(self, target: str, label: LabelState) -> None:
@@ -922,6 +1110,8 @@ class GitHubGitSeedClient:
                 )
             )
         )
+        if payload.get("incomplete_results") is not False:
+            raise SeedError("GitHub returned incomplete data")
         total = payload.get("total_count")
         if type(total) is not int or total < 0:
             raise SeedError("GitHub returned invalid data")
@@ -1067,17 +1257,12 @@ class GitHubGitSeedClient:
         )
 
     def get_ref(self, target: str, branch: str) -> str | None:
-        output = self._run(
-            (
-                "gh",
-                "api",
-                f"repos/{target}/git/ref/heads/{quote(branch, safe='')}",
-            ),
-            allowed_returncodes=frozenset({0, 1}),
+        document = self._read_optional_json(
+            f"repos/{target}/git/ref/heads/{quote(branch, safe='')}"
         )
-        if output.returncode != 0:
+        if document is None:
             return None
-        payload = _mapping(_json_document(output.stdout))
+        payload = _mapping(document)
         sha = _string(_mapping(payload.get("object")).get("sha"))
         if SHA_PATTERN.fullmatch(sha) is None:
             raise SeedError("GitHub returned invalid data")
@@ -1342,6 +1527,11 @@ LABEL_DEFINITIONS = (
         description="Fictional migration evidence required",
     ),
 )
+
+EXPECTED_MIGRATION_CHECKS = {
+    "blocking-suite": ("completed", "success"),
+    "advisory-synthetic": ("completed", "failure"),
+}
 
 
 @dataclass(frozen=True)
@@ -1868,19 +2058,35 @@ def _wait_for_migration_check(
     attempts: int,
     wait_seconds: float,
 ) -> str:
-    if not 1 <= attempts <= 24 or not 0 <= wait_seconds <= 60:
+    if (
+        SHA_PATTERN.fullmatch(candidate_sha) is None
+        or not 1 <= attempts <= 24
+        or not 0 <= wait_seconds <= 60
+    ):
         raise SeedError("migration check polling is invalid")
     for attempt in range(1, attempts + 1):
         runs = _all_checks(client, target, candidate_sha)
-        blocking = tuple(run for run in runs if run.name == "blocking-suite")
-        if len(blocking) > 1:
+        names = tuple(run.name for run in runs)
+        if any(name not in EXPECTED_MIGRATION_CHECKS for name in names) or any(
+            names.count(name) != 1 for name in set(names)
+        ):
             raise SeedError("migration check conflict")
-        if blocking:
-            run = blocking[0]
+        normalized_urls: dict[str, str] = {}
+        complete = len(runs) == len(EXPECTED_MIGRATION_CHECKS)
+        for run in runs:
             if run.head_sha != candidate_sha:
                 raise SeedError("migration check conflict")
-            if run.status == "completed" and run.conclusion == "success":
-                return _normalize_check_url(run.html_url)
+            normalized_urls[run.name] = _normalize_check_url(run.html_url)
+            expected_status, expected_conclusion = EXPECTED_MIGRATION_CHECKS[run.name]
+            if run.status == expected_status:
+                if run.conclusion != expected_conclusion:
+                    raise SeedError("migration check conflict")
+            elif run.status in {"queued", "in_progress"} and run.conclusion is None:
+                complete = False
+            else:
+                raise SeedError("migration check conflict")
+        if complete and set(names) == set(EXPECTED_MIGRATION_CHECKS):
+            return normalized_urls["blocking-suite"]
         if attempt < attempts:
             client.pause(wait_seconds)
     raise SeedError("migration check unavailable")
