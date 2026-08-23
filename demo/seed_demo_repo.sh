@@ -8,6 +8,7 @@ readonly REQUIRED_OWNER='floppy522'
 readonly REQUIRED_REPOSITORY='ai-release-intelligence-demo'
 readonly REQUIRED_TARGET="${REQUIRED_OWNER}/${REQUIRED_REPOSITORY}"
 readonly SCRIPT_DIRECTORY="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+readonly PROJECT_ROOT="$(CDPATH='' cd -- "${SCRIPT_DIRECTORY}/.." && pwd -P)"
 readonly DEFAULT_MANIFEST="${SCRIPT_DIRECTORY}/seed_manifest.yaml"
 readonly REPOSITORY_TEMPLATE="${SCRIPT_DIRECTORY}/repository"
 
@@ -38,8 +39,15 @@ target="$1"
 manifest_path="${ARI_SEED_MANIFEST:-${DEFAULT_MANIFEST}}"
 [ -f "${manifest_path}" ] || fail "manifest is missing"
 require_command gh
-require_command python3
+require_command uv
 require_command git
+
+# All YAML and JSON parsing uses the locked API environment, never an ambient
+# system Python installation. Keep the familiar command spelling below so every
+# parser invocation shares this constrained boundary.
+python3() {
+  uv run --project "${PROJECT_ROOT}/apps/api" python "$@"
+}
 
 temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/ari-demo-seed.XXXXXX")"
 resolved_manifest="${temporary_directory}/manifest.json"
@@ -254,6 +262,12 @@ try:
     records = json.loads(sys.argv[1])
 except json.JSONDecodeError as error:
     raise SystemExit("invalid GitHub list response") from error
+if isinstance(records, dict):
+    total = records.get("total_count")
+    items = records.get("items")
+    if type(total) is not int or total < 0 or total > 100 or not isinstance(items, list) or len(items) != total:
+        raise SystemExit("incomplete GitHub Search response")
+    records = items
 if not isinstance(records, list):
     raise SystemExit("invalid GitHub list response")
 marker, kind = sys.argv[2:]
@@ -267,6 +281,22 @@ if type(number) is not int or number <= 0:
     raise SystemExit("invalid GitHub marker match")
 print(number)
 PY
+}
+
+# GitHub Search returns a declared total, unlike fuzzy `gh issue list`. The
+# managed fixture is capped at one result per marker and fails closed on any
+# overflow or duplicate outside a first list page.
+search_marker() {
+  search_kind="$1"
+  stable_marker="$2"
+  gh api --method GET '/search/issues' -f "q=repo:${target} ${stable_marker} in:title is:${search_kind}" -f 'per_page=100'
+}
+
+require_expected_managed_ref() {
+  managed_ref="$1"
+  expected_sha="$2"
+  observed_sha="$(ref_sha "${managed_ref}")"
+  [ "${observed_sha}" = "${expected_sha}" ] || fail "expected managed ref does not match deterministic ancestry"
 }
 
 find_pr_number() {
@@ -302,7 +332,7 @@ PY
 
 gh auth status --hostname github.com >/dev/null 2>&1 || fail "GitHub authentication failed"
 
-if ! gh repo view "${target}" --json nameWithOwner >/dev/null 2>&1; then
+if ! gh repo view "${target}" --json nameWithOwner,visibility >/dev/null 2>&1; then
   # Initial content upload is isolated in a disposable directory. No credential
   # is embedded in a remote URL; GitHub CLI's configured git helper is used.
   staging_directory="${temporary_directory}/repository"
@@ -310,10 +340,24 @@ if ! gh repo view "${target}" --json nameWithOwner >/dev/null 2>&1; then
   cp -R "${REPOSITORY_TEMPLATE}/." "${staging_directory}/"
   git -C "${staging_directory}" init -q
   git -C "${staging_directory}" add --all
-  git -C "${staging_directory}" -c user.name='Fictional Release Demo' -c user.email='fictional-release-demo@example.invalid' commit -qm 'Initialize fictional release demo'
+  GIT_AUTHOR_DATE='2026-08-01T00:00:00Z' GIT_COMMITTER_DATE='2026-08-01T00:00:00Z' git -C "${staging_directory}" -c commit.gpgSign=false -c user.name='Fictional Release Demo' -c user.email='fictional-release-demo@example.invalid' commit -qm 'Initialize fictional release demo'
   git -C "${staging_directory}" branch -M main
   gh repo create "${target}" --public --source "${staging_directory}" --remote origin --push >/dev/null
 fi
+
+repository_metadata="$(gh repo view "${target}" --json nameWithOwner,visibility)"
+python3 - "${repository_metadata}" "${target}" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+if not isinstance(payload, dict):
+    raise SystemExit("invalid repository metadata")
+if payload.get("nameWithOwner") != sys.argv[2]:
+    raise SystemExit("repository identity mismatch")
+if payload.get("visibility") != "PUBLIC":
+    raise SystemExit("repository visibility must be PUBLIC")
+PY
 
 ensure_milestone() {
   wanted_number="$1"
@@ -372,6 +416,13 @@ gh label create 'release-ops' --repo "${target}" --color '5319e7' --description 
 gh label create 'release-blocker' --repo "${target}" --color 'b60205' --description 'Fictional resolved release blocker' --force
 gh label create 'migration-required' --repo "${target}" --color '0e8a16' --description 'Fictional migration evidence required' --force
 
+assignee="$(manifest_value 'issues.2.assignee')"
+assignee_permission="$(gh api "repos/${target}/collaborators/${assignee}/permission" --jq '.permission')"
+case "${assignee_permission}" in
+  admin|maintain|write) ;;
+  *) fail "assignee is not permitted to receive managed issues" ;;
+esac
+
 ref_sha() {
   gh api "repos/${target}/git/ref/heads/$1" --jq '.object.sha'
 }
@@ -379,10 +430,11 @@ ref_sha() {
 ensure_branch() {
   branch_name="$1"
   source_branch="$2"
+  source_sha="$(ref_sha "${source_branch}")"
   if gh api "repos/${target}/git/ref/heads/${branch_name}" >/dev/null 2>&1; then
+    require_expected_managed_ref "${branch_name}" "${source_sha}"
     return
   fi
-  source_sha="$(ref_sha "${source_branch}")"
   gh api --method POST "repos/${target}/git/refs" -f "ref=refs/heads/${branch_name}" -f "sha=${source_sha}" >/dev/null
 }
 
@@ -390,12 +442,25 @@ create_feature_branch() {
   branch_name="$1"
   source_branch="$2"
   commit_message="$3"
+  source_sha="$(ref_sha "${source_branch}")"
   if gh api "repos/${target}/git/ref/heads/${branch_name}" >/dev/null 2>&1; then
+    existing_sha="$(ref_sha "${branch_name}")"
+    existing_commit="$(gh api "repos/${target}/git/commits/${existing_sha}")"
+    python3 - "${existing_commit}" "${source_sha}" "${commit_message}" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+parents = payload.get("parents") if isinstance(payload, dict) else None
+message = payload.get("message") if isinstance(payload, dict) else None
+parent_sha = parents[0].get("sha") if isinstance(parents, list) and len(parents) == 1 and isinstance(parents[0], dict) else None
+if parent_sha != sys.argv[2] or message != sys.argv[3]:
+    raise SystemExit("expected managed ref has stale or unrelated ancestry")
+PY
     return
   fi
-  source_sha="$(ref_sha "${source_branch}")"
   source_tree="$(gh api "repos/${target}/git/commits/${source_sha}" --jq '.tree.sha')"
-  commit_sha="$(gh api --method POST "repos/${target}/git/commits" -f "message=${commit_message}" -f "tree=${source_tree}" -f "parents[]=${source_sha}" --jq '.sha')"
+  commit_sha="$(gh api --method POST "repos/${target}/git/commits" -f "message=${commit_message}" -f "tree=${source_tree}" -f "parents[]=${source_sha}" -f 'author[name]=Fictional Release Demo' -f 'author[email]=fictional-release-demo@example.invalid' -f 'author[date]=2026-08-01T00:00:00Z' -f 'committer[name]=Fictional Release Demo' -f 'committer[email]=fictional-release-demo@example.invalid' -f 'committer[date]=2026-08-01T00:00:00Z' --jq '.sha')"
   gh api --method POST "repos/${target}/git/refs" -f "ref=refs/heads/${branch_name}" -f "sha=${commit_sha}" >/dev/null
 }
 
@@ -410,20 +475,22 @@ while [ "${issue_index}" -lt "${issue_count}" ]; do
   issue_closed="$(manifest_value "issues.${issue_index}.closed")"
   issue_body="${temporary_directory}/issue-${issue_index}.md"
   manifest_body_file "issues.${issue_index}.body" "${issue_body}"
-  issue_matches="$(gh issue list --repo "${target}" --state all --search "${issue_marker} in:title" --limit 10 --json number,title)"
+  issue_matches="$(search_marker issue "${issue_marker}")"
   issue_number="$(find_marker_number "${issue_matches}" "${issue_marker}" issue)"
   if [ -z "${issue_number}" ]; then
     gh issue create --repo "${target}" --title "${issue_title}" --body-file "${issue_body}" --label "${issue_labels}" --milestone "${issue_milestone}" >/dev/null
-    issue_matches="$(gh issue list --repo "${target}" --state all --search "${issue_marker} in:title" --limit 10 --json number,title)"
+    issue_matches="$(search_marker issue "${issue_marker}")"
     issue_number="$(find_marker_number "${issue_matches}" "${issue_marker}" issue)"
     [ -n "${issue_number}" ] || fail "created issue cannot be reconciled"
   fi
-  gh issue edit "${issue_number}" --repo "${target}" --title "${issue_title}" --body-file "${issue_body}" --add-label "${issue_labels}" --milestone "${issue_milestone}" >/dev/null
+  gh issue edit "${issue_number}" --repo "${target}" --title "${issue_title}" --body-file "${issue_body}" --remove-label 'code-change' --remove-label 'release-ops' --remove-label 'release-blocker' --remove-label 'migration-required' --add-label "${issue_labels}" --milestone "${issue_milestone}" >/dev/null
   if [ "${issue_key}" = 'release-operations' ]; then
     gh issue edit "${issue_number}" --repo "${target}" --add-assignee "$(manifest_value "issues.${issue_index}.assignee")" >/dev/null
   fi
   if [ "${issue_closed}" = 'true' ]; then
     gh issue close "${issue_number}" --repo "${target}" >/dev/null
+  else
+    gh issue reopen "${issue_number}" --repo "${target}" >/dev/null
   fi
   printf '%s\t%s\n' "${issue_key}" "${issue_number}" >> "${temporary_directory}/issue-numbers.tsv"
   issue_index=$((issue_index + 1))
@@ -458,7 +525,7 @@ while [ "${pull_index}" -lt "${pull_count}" ]; do
   pull_matches="$(gh pr list --repo "${target}" --state all --search "${pull_marker} in:title" --limit 10 --json number,title,headRefName,baseRefName)"
   pull_number="$(find_pr_number "${pull_matches}" "${pull_marker}" "${pull_head}" "${pull_base}")"
   pull_body="${temporary_directory}/pull-${pull_index}.md"
-  printf '%s\n\nFixes #%s\n' "<!-- ${pull_marker} --> Fictional-only release evidence." "${issue_number}" > "${pull_body}"
+  printf '%s\n\nRelated to #%s\n' "<!-- ${pull_marker} --> Fictional-only release evidence." "${issue_number}" > "${pull_body}"
   if [ -z "${pull_number}" ]; then
     gh pr create --repo "${target}" --title "${pull_title}" --body-file "${pull_body}" --head "${pull_head}" --base "${pull_base}" >/dev/null
     pull_matches="$(gh pr list --repo "${target}" --state all --search "${pull_marker} in:title" --limit 10 --json number,title,headRefName,baseRefName)"
@@ -494,4 +561,49 @@ done
 # The candidate is cut after the main-bound current change, keeping candidate
 # inclusion evidence deterministic. Creating the branch starts the safe CI.
 ensure_branch "$(manifest_value candidate_branch)" "$(manifest_value main_branch)"
+
+# Actions assigns check-run/job URLs only after the candidate ref exists. Poll a
+# bounded number of times and accept exactly one completed successful blocking
+# check; never fabricate a migration URL.
+candidate_sha="$(ref_sha "$(manifest_value candidate_branch)")"
+migration_url=''
+migration_attempt=1
+migration_wait_seconds="${ARI_SEED_MIGRATION_WAIT_SECONDS:-5}"
+while [ "${migration_attempt}" -le 12 ]; do
+  check_payload="$(gh api "repos/${target}/commits/${candidate_sha}/check-runs?per_page=100")"
+  migration_url="$(python3 - "${check_payload}" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+runs = payload.get("check_runs") if isinstance(payload, dict) else None
+if not isinstance(runs, list):
+    raise SystemExit("invalid migration check response")
+matches = [
+    run for run in runs
+    if isinstance(run, dict)
+    and run.get("name") == "blocking-suite"
+    and run.get("status") == "completed"
+    and run.get("conclusion") == "success"
+    and isinstance(run.get("html_url"), str)
+]
+if len(matches) > 1:
+    raise SystemExit("conflicting migration check evidence")
+if matches:
+    print(matches[0]["html_url"])
+PY
+)"
+  if [ -n "${migration_url}" ]; then
+    break
+  fi
+  migration_attempt=$((migration_attempt + 1))
+  sleep "${migration_wait_seconds}"
+done
+[ -n "${migration_url}" ] || fail "migration check did not become successful before timeout"
+operations_issue_number="$(issue_number_for_key 'release-operations')"
+operations_body="${temporary_directory}/release-operations-with-migration.md"
+manifest_body_file 'issues.2.body' "${operations_body}"
+printf '\n\n### Migration evidence\n%s\n' "${migration_url}" >> "${operations_body}"
+gh issue edit "${operations_issue_number}" --repo "${target}" --body-file "${operations_body}" >/dev/null
+
 printf '%s\n' 'seed-demo-repo: fictional demo evidence reconciled; workflow results remain a remote publish gate.'

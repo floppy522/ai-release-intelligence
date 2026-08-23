@@ -159,7 +159,7 @@ if [ \"${1:-}\" = auth ]; then
 fi
 if [ \"${1:-}\" = repo ] && [ \"${2:-}\" = view ]; then
   [ \"${FAKE_GH_REPO:-present}\" = present ] || exit 1
-  printf '%s\\n' '{\"nameWithOwner\":\"floppy522/ai-release-intelligence-demo\"}'
+  printf '%s\\n' '{\"nameWithOwner\":\"floppy522/ai-release-intelligence-demo\",\"visibility\":\"PUBLIC\"}'
   exit 0
 fi
 if [ \"${1:-}\" = issue ] && [ \"${2:-}\" = list ]; then
@@ -190,9 +190,24 @@ if [ \"${1:-}\" = pr ] && [ \"${2:-}\" = list ]; then
   exit 0
 fi
 if [ \"${1:-}\" = api ]; then
+  case \"$*\" in *git/ref/heads/fixture/*) exit 1 ;; esac
   case \"$*\" in
+    *collaborators/*) printf '%s\\n' 'write' ;;
+    *search/issues*)
+      if [ -n \"${FAKE_GH_SEARCH:-}\" ]; then
+        printf '%s\\n' \"$FAKE_GH_SEARCH\"
+      else
+      case \"$*\" in
+        *previous-code*) printf '%s\\n' '{\"total_count\":1,\"items\":[{\"number\":11,\"title\":\"[ari-demo:v1:previous-code] fictional\"}]}' ;;
+        *current-code*) printf '%s\\n' '{\"total_count\":1,\"items\":[{\"number\":12,\"title\":\"[ari-demo:v1:current-code] fictional\"}]}' ;;
+        *release-operations*) printf '%s\\n' '{\"total_count\":1,\"items\":[{\"number\":13,\"title\":\"[ari-demo:v1:release-operations] fictional\"}]}' ;;
+        *resolved-blocker*) printf '%s\\n' '{\"total_count\":1,\"items\":[{\"number\":14,\"title\":\"[ari-demo:v1:resolved-blocker] fictional\"}]}' ;;
+        *) printf '%s\\n' '{\"total_count\":0,\"items\":[]}' ;;
+      esac
+      fi ;;
     *git/ref/heads*) printf '%s\\n' '{\"object\":{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}' ;;
     *milestones*) printf '%s\\n' '[{\"number\":1,\"title\":\"Fictional archive 1\"},{\"number\":2,\"title\":\"Fictional archive 2\"},{\"number\":3,\"title\":\"Fictional archive 3\"},{\"number\":4,\"title\":\"Fictional archive 4\"},{\"number\":5,\"title\":\"Fictional archive 5\"},{\"number\":6,\"title\":\"Release 2026.08.03\"},{\"number\":7,\"title\":\"Release 2026.08.10\"}]' ;;
+    *check-runs*) printf '%s\\n' '{\"check_runs\":[{\"name\":\"blocking-suite\",\"status\":\"completed\",\"conclusion\":\"success\",\"html_url\":\"https://github.com/floppy522/ai-release-intelligence-demo/runs/7001\"}]}' ;;
     *pulls/*) printf '%s\\n' '{\"merged\":true,\"head\":{\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}' ;;
     *) printf '%s\\n' '{}' ;;
   esac
@@ -258,11 +273,14 @@ def test_seed_refuses_wrong_owner_auth_failure_and_conflicting_duplicates(
     assert "issue create" not in auth_failure.fake_log  # type: ignore[attr-defined]
     duplicate = _run_seed(
         tmp_path / "duplicate",
-        FAKE_GH_ISSUES=json.dumps(
-            [
-                {"number": 1, "title": "[ari-demo:v1:previous-code] fictional"},
-                {"number": 2, "title": "[ari-demo:v1:previous-code] fictional"},
-            ]
+        FAKE_GH_SEARCH=json.dumps(
+            {
+                "total_count": 2,
+                "items": [
+                    {"number": 1, "title": "[ari-demo:v1:previous-code] fictional"},
+                    {"number": 2, "title": "[ari-demo:v1:previous-code] fictional"},
+                ],
+            }
         ),
     )
     assert duplicate.returncode != 0
@@ -299,3 +317,42 @@ def test_seed_script_is_bash_safe_and_does_not_leak_credentials() -> None:
     assert "GITHUB_TOKEN" not in text
     assert "Authorization:" not in text
     assert shutil.which("bash") is not None
+
+
+def test_seed_uses_locked_python_and_validates_repository_before_mutation() -> None:
+    """A system Python or private/mismatched repo must not reach mutation calls."""
+
+    text = SEED_SCRIPT.read_text(encoding="utf-8")
+    assert "uv run --project" in text
+    assert "nameWithOwner,visibility" in text
+    assert "repository visibility" in text
+    assert "collaborators/${assignee}/permission" in text
+
+
+def test_seed_converges_managed_issue_state_and_safe_cross_references() -> None:
+    """A rerun must repair only managed state without auto-closing code Issues."""
+
+    text = SEED_SCRIPT.read_text(encoding="utf-8")
+    assert "gh issue reopen" in text
+    assert "--remove-label" in text
+    assert "Related to #%s" in text
+    assert "Fixes #%s" not in text
+
+
+def test_seed_ref_and_search_guards_are_complete_and_fail_closed() -> None:
+    """Existing managed refs and page-two duplicates cannot silently win."""
+
+    text = SEED_SCRIPT.read_text(encoding="utf-8")
+    assert "/search/issues" in text
+    assert "total_count" in text
+    assert "expected managed ref" in text
+    assert "commit.gpgSign=false" in text
+
+
+def test_seed_waits_for_exact_successful_migration_check_before_ops_edit() -> None:
+    """The release-ops migration URL must be observed, not invented."""
+
+    text = SEED_SCRIPT.read_text(encoding="utf-8")
+    assert "check-runs" in text
+    assert "Migration evidence" in text
+    assert "migration check" in text

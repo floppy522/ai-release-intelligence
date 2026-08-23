@@ -51,7 +51,7 @@ issues:
     milestone: Release 2026.08.10
     labels: [release-ops]
     closed: false
-    assignee: release-demo-owner
+    assignee: floppy522
     body: |
       <!-- ari-demo:v1:release-operations -->
       ## Before release
