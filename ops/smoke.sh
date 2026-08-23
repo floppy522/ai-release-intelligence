@@ -53,7 +53,7 @@ esac
 
 page=$(fetch /)
 case "$page" in
-  *'Release intelligence'*) ;;
+  *'AI Release Intelligence'*) ;;
   *) echo "Web response was invalid" >&2; exit 1 ;;
 esac
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -138,6 +139,43 @@ def test_compose_ci_jobs_use_failure_diagnostics_before_cleanup() -> None:
         assert "ops/compose_cleanup.sh" in run_scripts
 
 
+def test_playwright_ci_resolves_pnpm_from_e2e_package_context() -> None:
+    package = json.loads((ROOT / "tests/e2e/package.json").read_text(encoding="utf-8"))
+    assert package["packageManager"] == "pnpm@11.19.0"
+
+    workflow = _yaml(".github/workflows/ci.yml")
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    job = jobs["playwright-e2e"]
+    assert isinstance(job, dict)
+    run_scripts = "\n".join(
+        str(step.get("run", "")) for step in job["steps"] if isinstance(step, dict)
+    )
+
+    lines = run_scripts.splitlines()
+    subshell_start = next(
+        index for index, line in enumerate(lines) if line.strip() == "("
+    )
+    subshell_end = next(
+        index
+        for index, line in enumerate(lines[subshell_start + 1 :], subshell_start + 1)
+        if line.strip() == ")"
+    )
+    subshell_body = [line.strip() for line in lines[subshell_start + 1 : subshell_end]]
+    outside_subshell = lines[:subshell_start] + lines[subshell_end + 1 :]
+    assert subshell_body == [
+        "cd tests/e2e",
+        "pnpm --version",
+        "pnpm install --frozen-lockfile",
+        "pnpm exec playwright install --with-deps chromium",
+        "pnpm exec playwright test",
+    ]
+    assert not any(
+        re.match(r"^\s*pnpm(?:\s|$)", line) for line in outside_subshell
+    )
+    assert "pnpm --dir tests/e2e" not in run_scripts
+
+
 def test_compose_cleanup_reports_bounded_logs_without_dumping_secrets(
     tmp_path: Path,
 ) -> None:
@@ -238,7 +276,7 @@ def test_smoke_script_checks_health_api_and_web_without_verbose_curl(
         'case "$*" in\n'
         "  *healthz*) printf '%s' '{\"status\":\"ok\"}' ;;\n"
         "  *api/demo/analysis*) printf '%s' '{\"status\":\"NOT_READY\"}' ;;\n"
-        "  *) printf '%s' '<!doctype html><title>Release intelligence</title>' ;;\n"
+        '  *) cat "$SMOKE_WEB_HTML" ;;\n'
         "esac\n",
         encoding="utf-8",
     )
@@ -249,6 +287,7 @@ def test_smoke_script_checks_health_api_and_web_without_verbose_curl(
         "SMOKE_BASE_URL": "http://stack.test",
         "SMOKE_ATTEMPTS": "1",
         "SMOKE_TIMEOUT_SECONDS": "1",
+        "SMOKE_WEB_HTML": str(ROOT / "apps/web/index.html"),
     }
     result = subprocess.run(
         ["sh", str(ROOT / "ops/smoke.sh")],

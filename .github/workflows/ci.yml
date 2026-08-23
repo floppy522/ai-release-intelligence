@@ -141,9 +141,13 @@ jobs:
           trap cleanup EXIT
           docker compose -f compose.test.yaml up --build -d --wait
           corepack enable
-          pnpm --dir tests/e2e install --frozen-lockfile
-          pnpm --dir tests/e2e exec playwright install --with-deps chromium
-          pnpm --dir tests/e2e exec playwright test
+          (
+            cd tests/e2e
+            pnpm --version
+            pnpm install --frozen-lockfile
+            pnpm exec playwright install --with-deps chromium
+            pnpm exec playwright test
+          )
 
   docker-smoke:
     runs-on: ubuntu-latest
