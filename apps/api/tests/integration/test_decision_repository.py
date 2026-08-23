@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -56,6 +57,17 @@ def _asyncpg_url(database_url: str) -> str:
     return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
 
+async def _connect(database_url: str) -> asyncpg.Connection:
+    connection = await asyncpg.connect(_asyncpg_url(database_url))
+    await connection.set_type_codec(
+        "jsonb",
+        schema="pg_catalog",
+        encoder=json.dumps,
+        decoder=json.loads,
+    )
+    return connection
+
+
 @pytest.fixture(scope="session")
 def database_url() -> str:
     return _require_database_url()
@@ -76,7 +88,7 @@ def migrated_database(database_url: str) -> None:
 
 @pytest.fixture
 async def postgres(database_url: str) -> AsyncIterator[asyncpg.Connection]:
-    connection = await asyncpg.connect(_asyncpg_url(database_url))
+    connection = await _connect(database_url)
     await connection.execute("TRUNCATE TABLE repository_connections CASCADE")
     try:
         yield connection
@@ -171,7 +183,12 @@ async def decision_run(
         severity="ADVISORY",
         summary="Stored non-decision context",
         required_action="Review stored context",
-        evidence=(release_snapshot.issue_evidence,),
+        evidence=(
+            replace(
+                release_snapshot.issue_evidence,
+                fingerprint="sha256:" + "c" * 64,
+            ),
+        ),
     )
     findings = (*findings, noneligible)
     assessment = ReadinessAssessment(
@@ -336,6 +353,14 @@ async def test_insufficient_or_stale_run_rejects_decision_without_write(
             release_snapshot,
             fetch_started_at=NOW - timedelta(minutes=12),
             fetched_at=NOW - timedelta(minutes=11),
+            checks=tuple(
+                replace(
+                    check,
+                    started_at=NOW - timedelta(minutes=12),
+                    completed_at=NOW - timedelta(minutes=11),
+                )
+                for check in release_snapshot.checks
+            ),
         )
         status = ReleaseStatus.NEEDS_DECISION
     findings = evaluate_checks(release_snapshot, configured_policy, decisions=())
@@ -421,7 +446,7 @@ async def test_concurrent_decisions_allow_one_atomic_winner(
     assert rows[0]["decision_sequence"] == 1
 
 
-async def test_repository_retention_cascade_removes_decision(
+async def test_repository_retention_cascade_removes_supersession_lineage(
     repository: AnalysisRepository,
     postgres: asyncpg.Connection,
     decision_run: tuple[UUID, UUID, UUID, str],
@@ -437,14 +462,39 @@ async def test_repository_retention_cascade_removes_decision(
         actor="github:7",
         authorized_repository_id=REPOSITORY_ID,
     )
-    latest_id = await postgres.fetchval(
+    root_id = await postgres.fetchval(
         "SELECT id FROM human_decisions WHERE analysis_run_id = $1 "
         "ORDER BY decision_sequence DESC LIMIT 1",
         run_id,
     )
+    child_id = uuid4()
+    await postgres.execute(
+        "INSERT INTO human_decisions "
+        "(id, analysis_run_id, finding_id, fingerprint, supersedes_decision_id, "
+        "decision, reason, actor_id, decision_sequence, assessment_status, "
+        "assessment_payload, decided_at) "
+        "VALUES ($1, $2, $3, $4, $5, 'RELEASE_BLOCKER', "
+        "'Superseding audit decision', 'github:8', 2, 'NOT_READY', $6, $7)",
+        child_id,
+        run_id,
+        finding_id,
+        fingerprint,
+        root_id,
+        [],
+        NOW + timedelta(seconds=1),
+    )
+    lineage = await postgres.fetch(
+        "SELECT id, supersedes_decision_id FROM human_decisions "
+        "WHERE analysis_run_id = $1 ORDER BY decision_sequence",
+        run_id,
+    )
+    assert [(row["id"], row["supersedes_decision_id"]) for row in lineage] == [
+        (root_id, None),
+        (child_id, root_id),
+    ]
 
     with pytest.raises(asyncpg.PostgresError, match="immutable analysis records"):
-        await postgres.execute("DELETE FROM human_decisions WHERE id = $1", latest_id)
+        await postgres.execute("DELETE FROM human_decisions WHERE id = $1", child_id)
 
     await postgres.execute(
         "DELETE FROM repository_connections WHERE external_repository_id = $1",

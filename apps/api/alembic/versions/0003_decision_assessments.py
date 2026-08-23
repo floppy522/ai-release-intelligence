@@ -192,7 +192,9 @@ def upgrade() -> None:
         "human_decisions",
         ["supersedes_decision_id"],
         ["id"],
-        ondelete="CASCADE",
+        ondelete="NO ACTION",
+        deferrable=True,
+        initially="DEFERRED",
     )
     op.execute("DROP TRIGGER human_decisions_immutable_update ON human_decisions")
     op.execute(

@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from release_intelligence.adapters.persistence.models import HumanDecisionRow
+
 API_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -62,9 +64,15 @@ def test_legacy_backfill_fails_closed_before_aggregating_incomplete_audit_data(
     assert "evidence.id IS NULL" in upgrade_sql
 
 
-def test_decision_retention_constraints_allow_only_cascaded_deletion(
+def test_decision_retention_constraint_is_deferred_without_cascading_lineage(
     upgrade_sql: str,
 ) -> None:
+    rebuilt_constraints = upgrade_sql[
+        upgrade_sql.index(
+            "ALTER TABLE human_decisions DROP CONSTRAINT "
+            "human_decisions_supersedes_decision_id_fkey"
+        ) :
+    ]
     assert "CREATE FUNCTION prevent_direct_decision_change" in upgrade_sql
     assert "pg_trigger_depth() = 1" in upgrade_sql
     assert (
@@ -73,6 +81,18 @@ def test_decision_retention_constraints_allow_only_cascaded_deletion(
     )
     assert (
         "FOREIGN KEY(supersedes_decision_id) REFERENCES human_decisions (id) "
-        "ON DELETE CASCADE"
-        in upgrade_sql
+        "ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED"
+        in rebuilt_constraints
     )
+
+
+def test_model_metadata_matches_deferred_lineage_constraint() -> None:
+    foreign_key = next(
+        key
+        for key in HumanDecisionRow.__table__.foreign_keys
+        if key.parent.name == "supersedes_decision_id"
+    )
+
+    assert foreign_key.ondelete == "NO ACTION"
+    assert foreign_key.deferrable is True
+    assert foreign_key.initially == "DEFERRED"

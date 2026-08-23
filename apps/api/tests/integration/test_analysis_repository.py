@@ -535,10 +535,12 @@ async def test_human_decision_schema_preserves_fingerprint_and_lineage(
     assert column_nullability["supersedes_decision_id"] == "YES"
 
     constraint = await postgres.fetchrow(
-        "SELECT confdeltype FROM pg_constraint "
+        "SELECT confdeltype, condeferrable, condeferred FROM pg_constraint "
         "WHERE conrelid = 'human_decisions'::regclass "
         "AND contype = 'f' AND pg_get_constraintdef(oid) "
         "LIKE '%supersedes_decision_id%'"
     )
     assert constraint is not None
-    assert constraint["confdeltype"] == b"r"
+    assert constraint["confdeltype"] == b"a"
+    assert constraint["condeferrable"] is True
+    assert constraint["condeferred"] is True

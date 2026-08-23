@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -42,6 +43,17 @@ def _asyncpg_url(database_url: str) -> str:
     return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
 
+async def _connect(database_url: str) -> asyncpg.Connection:
+    connection = await asyncpg.connect(_asyncpg_url(database_url))
+    await connection.set_type_codec(
+        "jsonb",
+        schema="pg_catalog",
+        encoder=json.dumps,
+        decoder=json.loads,
+    )
+    return connection
+
+
 def _run_alembic(*arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "alembic", "-c", "alembic.ini", *arguments],
@@ -61,7 +73,7 @@ def _alembic(*arguments: str) -> None:
 async def test_upgrade_from_0002_preserves_legacy_run_assessment() -> None:
     database_url = _database_url()
     _alembic("downgrade", "0002_policy_config")
-    postgres = await asyncpg.connect(_asyncpg_url(database_url))
+    postgres = await _connect(database_url)
     try:
         await postgres.execute("TRUNCATE TABLE repository_connections CASCADE")
         await postgres.execute(
@@ -95,9 +107,10 @@ async def test_upgrade_from_0002_preserves_legacy_run_assessment() -> None:
         )
         await postgres.execute(
             "INSERT INTO release_snapshots (id, analysis_run_id, payload) "
-            "VALUES ($1, $2, '{}'::jsonb)",
+            "VALUES ($1, $2, $3)",
             SNAPSHOT_ID,
             RUN_ID,
+            {},
         )
         await postgres.execute(
             "INSERT INTO readiness_findings "
@@ -132,19 +145,29 @@ async def test_upgrade_from_0002_preserves_legacy_run_assessment() -> None:
         await postgres.close()
 
     _alembic("upgrade", "head")
-    postgres = await asyncpg.connect(_asyncpg_url(database_url))
+    postgres = await _connect(database_url)
     try:
         row = await postgres.fetchrow(
-            "SELECT decision_sequence, assessment_status, assessment_payload "
+            "SELECT decision_sequence, assessment_status, assessment_payload, "
+            "jsonb_typeof(assessment_payload) AS assessment_payload_type "
             "FROM human_decisions WHERE id = $1",
             DECISION_ID,
+        )
+        snapshot_row = await postgres.fetchrow(
+            "SELECT payload, jsonb_typeof(payload) AS payload_type "
+            "FROM release_snapshots WHERE id = $1",
+            SNAPSHOT_ID,
         )
     finally:
         await postgres.close()
 
     assert row is not None
+    assert snapshot_row is not None
+    assert snapshot_row["payload"] == {}
+    assert snapshot_row["payload_type"] == "object"
     assert row["decision_sequence"] == 1
     assert row["assessment_status"] == "NOT_READY"
+    assert row["assessment_payload_type"] == "array"
     assert row["assessment_payload"] == [
         {
             "rule_id": "checks.blocking_not_successful",
@@ -167,7 +190,7 @@ async def test_upgrade_from_0002_preserves_legacy_run_assessment() -> None:
 async def test_upgrade_from_0002_rejects_incomplete_legacy_audit_data() -> None:
     database_url = _database_url()
     _alembic("downgrade", "0002_policy_config")
-    postgres = await asyncpg.connect(_asyncpg_url(database_url))
+    postgres = await _connect(database_url)
     try:
         await postgres.execute("TRUNCATE TABLE repository_connections CASCADE")
         await postgres.execute(
@@ -211,7 +234,7 @@ async def test_upgrade_from_0002_rejects_incomplete_legacy_audit_data() -> None:
         assert "legacy human decision audit data is incomplete" in (
             result.stdout + result.stderr
         )
-        postgres = await asyncpg.connect(_asyncpg_url(database_url))
+        postgres = await _connect(database_url)
         try:
             assert await postgres.fetchval(
                 "SELECT version_num FROM alembic_version"
@@ -219,7 +242,7 @@ async def test_upgrade_from_0002_rejects_incomplete_legacy_audit_data() -> None:
         finally:
             await postgres.close()
     finally:
-        postgres = await asyncpg.connect(_asyncpg_url(database_url))
+        postgres = await _connect(database_url)
         try:
             await postgres.execute("TRUNCATE TABLE repository_connections CASCADE")
         finally:
@@ -230,7 +253,7 @@ async def test_upgrade_from_0002_rejects_incomplete_legacy_audit_data() -> None:
 async def test_upgrade_from_0003_preserves_terminal_rows_and_unlocks_pending() -> None:
     database_url = _database_url()
     _alembic("downgrade", "0003_decision_assessments")
-    postgres = await asyncpg.connect(_asyncpg_url(database_url))
+    postgres = await _connect(database_url)
     try:
         await postgres.execute("TRUNCATE TABLE repository_connections CASCADE")
         await postgres.execute(
@@ -274,7 +297,7 @@ async def test_upgrade_from_0003_preserves_terminal_rows_and_unlocks_pending() -
         await postgres.close()
 
     _alembic("upgrade", "head")
-    postgres = await asyncpg.connect(_asyncpg_url(database_url))
+    postgres = await _connect(database_url)
     try:
         await postgres.execute(
             'UPDATE ai_explanations SET content = \'{"state":"unavailable"}\' '

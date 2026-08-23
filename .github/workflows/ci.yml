@@ -84,7 +84,9 @@ jobs:
         run: corepack enable
       - name: Install locked web dependencies
         working-directory: apps/web
-        run: pnpm install --frozen-lockfile
+        run: |
+          pnpm --version
+          pnpm install --frozen-lockfile
       - name: Test, lint, type-check, and build web
         working-directory: apps/web
         run: |

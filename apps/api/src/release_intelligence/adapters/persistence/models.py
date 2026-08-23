@@ -344,7 +344,13 @@ class HumanDecisionRow(Base):
     )
     fingerprint: Mapped[str] = mapped_column(String(255), nullable=False)
     supersedes_decision_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("human_decisions.id", ondelete="CASCADE"), nullable=True
+        ForeignKey(
+            "human_decisions.id",
+            ondelete="NO ACTION",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        nullable=True,
     )
     decision: Mapped[str] = mapped_column(String(32), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
