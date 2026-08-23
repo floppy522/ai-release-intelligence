@@ -1,0 +1,15 @@
+{
+  "id": 9300142,
+  "number": 142,
+  "html_url": "https://github.com/octo-fixtures/release-demo/pull/142",
+  "state": "closed",
+  "labels": [{"name": "code-change"}],
+  "assignees": [{"login": "lee-api"}],
+  "milestone": {"number": 7},
+  "head": {"ref": "feature/payment-retry", "sha": "1111111111111111111111111111111111111111"},
+  "base": {"ref": "main", "sha": "2222222222222222222222222222222222222222"},
+  "merge_commit_sha": "3333333333333333333333333333333333333333",
+  "merged_at": "2026-08-06T15:00:00Z",
+  "created_at": "2026-08-02T09:00:00Z",
+  "updated_at": "2026-08-06T15:00:00Z"
+}

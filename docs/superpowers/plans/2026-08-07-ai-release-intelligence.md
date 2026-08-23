@@ -472,7 +472,7 @@ Keep the installation token in request memory only.
 ```python
 async def test_repository_access_rejects_different_installation(client, user_session):
     response = await client.get(
-        "/api/repositories/other-owner/private-repo",
+        "/api/repositories/by-name/other-owner/private-repo",
         cookies=user_session.cookies,
     )
     assert response.status_code == 403

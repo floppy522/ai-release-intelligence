@@ -1,0 +1,155 @@
+name: CI
+
+'on':
+  pull_request:
+  push:
+    branches: [main, feature/ai-release-intelligence]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-unit-static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+      - name: Synchronize locked API dependencies
+        working-directory: apps/api
+        run: uv sync --locked
+      - name: Run unit, contract, and security tests
+        working-directory: apps/api
+        run: uv run pytest tests/unit tests/contract tests/security -v -W error
+      - name: Lint and type-check API
+        working-directory: apps/api
+        run: |
+          uv run ruff check src tests
+          uv run mypy
+          uv lock --check
+
+  api-postgres-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: postgresql+asyncpg://release_intelligence:integration-only@localhost:5432/release_intelligence_test
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: release_intelligence_test
+          POSTGRES_USER: release_intelligence
+          POSTGRES_PASSWORD: integration-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U release_intelligence -d release_intelligence_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+      - name: Synchronize locked API dependencies
+        working-directory: apps/api
+        run: uv sync --locked
+      - name: Apply PostgreSQL 18 migrations
+        working-directory: apps/api
+        run: uv run alembic upgrade head
+      - name: Run real PostgreSQL integration contracts
+        working-directory: apps/api
+        run: uv run pytest tests/integration -v -W error
+      - name: Verify migration round trip
+        working-directory: apps/api
+        run: |
+          uv run alembic downgrade base
+          uv run alembic upgrade head
+
+  web-test-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Enable pinned package manager
+        run: corepack enable
+      - name: Install locked web dependencies
+        working-directory: apps/web
+        run: pnpm install --frozen-lockfile
+      - name: Test, lint, type-check, and build web
+        working-directory: apps/web
+        run: |
+          pnpm test
+          pnpm lint
+          pnpm typecheck
+          pnpm build
+
+  security-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+      - name: Synchronize locked API dependencies
+        working-directory: apps/api
+        run: uv sync --locked
+      - name: Run security suite and all 44 benchmark scenarios
+        working-directory: apps/api
+        run: |
+          uv run pytest tests/security -v -W error
+          uv run python -m release_intelligence.benchmark.runner \
+            --catalog ../../benchmarks/scenarios/catalog.yaml \
+            --output "${RUNNER_TEMP}/benchmark-results.json"
+      - name: Upload non-sensitive benchmark result
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: deterministic-benchmark-results
+          path: ${{ runner.temp }}/benchmark-results.json
+          if-no-files-found: error
+          retention-days: 14
+
+  playwright-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Run persisted vertical release scenario
+        env:
+          E2E_BASE_URL: http://127.0.0.1:4173
+        run: |
+          set -euo pipefail
+          cleanup() { docker compose -f compose.test.yaml down -v --remove-orphans; }
+          trap cleanup EXIT
+          docker compose -f compose.test.yaml up --build -d --wait
+          corepack enable
+          pnpm --dir tests/e2e install --frozen-lockfile
+          pnpm --dir tests/e2e exec playwright install --with-deps chromium
+          pnpm --dir tests/e2e exec playwright test
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Build, verify, and clean the isolated stack
+        env:
+          SMOKE_BASE_URL: http://127.0.0.1:4173
+        run: |
+          set -euo pipefail
+          cleanup() { docker compose -f compose.test.yaml down -v --remove-orphans; }
+          trap cleanup EXIT
+          docker compose -f compose.test.yaml config --quiet
+          docker compose -f compose.test.yaml up --build -d --wait
+          sh ops/smoke.sh

@@ -1,0 +1,28 @@
+name: Fictional release checks
+
+'on':
+  push:
+    branches:
+      - 'release/**'
+
+permissions:
+  contents: read
+
+jobs:
+  blocking-suite:
+    name: blocking-suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Run fictional idempotent migration
+        run: python scripts/migrate.py --database "$RUNNER_TEMP/fictional-release.sqlite3"
+      - name: Test fictional migration
+        run: python -m unittest tests/test_migration.py
+  advisory-synthetic:
+    name: advisory-synthetic
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Record intentional fictional advisory failure
+        run: exit 1

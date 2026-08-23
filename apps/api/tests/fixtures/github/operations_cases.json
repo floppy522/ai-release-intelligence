@@ -1,0 +1,29 @@
+{
+  "cases": [
+    {
+      "name": "complete_without_migration",
+      "body": "### Before release\nConfirm the backup.\n\n### During release\nMonitor the rollout.\n\n### After release\nVerify service health.",
+      "expected_rules": []
+    },
+    {
+      "name": "missing_before",
+      "body": "### During release\nMonitor the rollout.\n\n### After release\nVerify service health.",
+      "expected_rules": ["operations.section_required"]
+    },
+    {
+      "name": "blank_during",
+      "body": "### Before release\nConfirm the backup.\n\n### During release\n\n### After release\nVerify service health.",
+      "expected_rules": ["operations.section_required"]
+    },
+    {
+      "name": "placeholder_after",
+      "body": "### Before release\nConfirm the backup.\n\n### During release\nMonitor the rollout.\n\n### After release\n- [ ] Describe after-release verification",
+      "expected_rules": ["operations.section_required"]
+    },
+    {
+      "name": "successful_migration",
+      "body": "### Before release\nConfirm the backup.\n\n### During release\nRun the migration.\n\n### After release\nVerify service health.\n\n### Migration evidence\nhttps://github.com/acme/widgets/runs/101",
+      "expected_rules": []
+    }
+  ]
+}
