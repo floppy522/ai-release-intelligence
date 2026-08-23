@@ -132,7 +132,12 @@ jobs:
           E2E_BASE_URL: http://127.0.0.1:4173
         run: |
           set -euo pipefail
-          cleanup() { docker compose -f compose.test.yaml down -v --remove-orphans; }
+          cleanup() {
+            status=$?
+            trap - EXIT
+            sh ops/compose_cleanup.sh "$status" || true
+            exit "$status"
+          }
           trap cleanup EXIT
           docker compose -f compose.test.yaml up --build -d --wait
           corepack enable
@@ -150,7 +155,12 @@ jobs:
           SMOKE_BASE_URL: http://127.0.0.1:4173
         run: |
           set -euo pipefail
-          cleanup() { docker compose -f compose.test.yaml down -v --remove-orphans; }
+          cleanup() {
+            status=$?
+            trap - EXIT
+            sh ops/compose_cleanup.sh "$status" || true
+            exit "$status"
+          }
           trap cleanup EXIT
           docker compose -f compose.test.yaml config --quiet
           docker compose -f compose.test.yaml up --build -d --wait

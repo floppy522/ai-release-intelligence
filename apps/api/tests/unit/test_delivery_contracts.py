@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -75,6 +75,32 @@ def test_dockerfiles_are_multistage_non_root_and_exec_form() -> None:
         )
 
 
+def test_api_runtime_venv_preserves_console_script_shebang_target() -> None:
+    dockerfile = (ROOT / "apps/api/Dockerfile").read_text(encoding="utf-8")
+    builder, runtime = re.split(
+        r"(?m)^FROM .+ AS runtime$", dockerfile, maxsplit=1
+    )
+    workdir_match = re.search(r"(?m)^WORKDIR (\S+)$", builder)
+    assert workdir_match is not None
+    configured_venv = re.search(
+        r"(?m)^\s*UV_PROJECT_ENVIRONMENT=(\S+?)(?:\s*\\)?$", builder
+    )
+    builder_venv = PurePosixPath(
+        configured_venv.group(1)
+        if configured_venv is not None
+        else str(PurePosixPath(workdir_match.group(1)) / ".venv")
+    )
+    copy_match = re.search(
+        r"(?m)^COPY --from=builder(?: --chown=\S+)? (\S+) (\S+)$", runtime
+    )
+    assert copy_match is not None
+    copied_from = PurePosixPath(copy_match.group(1))
+    runtime_venv = PurePosixPath(copy_match.group(2))
+
+    assert copied_from == builder_venv
+    assert runtime_venv == builder_venv
+
+
 def test_ci_has_exact_blocking_jobs_and_sha_pinned_actions() -> None:
     workflow = _yaml(".github/workflows/ci.yml")
     assert workflow["permissions"] == {"contents": "read"}
@@ -97,6 +123,71 @@ def test_ci_has_exact_blocking_jobs_and_sha_pinned_actions() -> None:
                 continue
             _action, separator, revision = str(step["uses"]).rpartition("@")
             assert separator and FULL_SHA.fullmatch(revision)
+
+
+def test_compose_ci_jobs_use_failure_diagnostics_before_cleanup() -> None:
+    workflow = _yaml(".github/workflows/ci.yml")
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    for job_name in ("playwright-e2e", "docker-smoke"):
+        job = jobs[job_name]
+        assert isinstance(job, dict)
+        run_scripts = "\n".join(
+            str(step.get("run", "")) for step in job["steps"] if isinstance(step, dict)
+        )
+        assert "ops/compose_cleanup.sh" in run_scripts
+
+
+def test_compose_cleanup_reports_bounded_logs_without_dumping_secrets(
+    tmp_path: Path,
+) -> None:
+    calls = tmp_path / "docker.calls"
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        "#!/bin/sh\n" f"printf '%s\\n' \"$*\" >> {calls}\n", encoding="utf-8"
+    )
+    fake_docker.chmod(0o755)
+    secret = "postgresql+asyncpg://user:do-not-print@postgres/database"
+    environment = {
+        **os.environ,
+        "ARI_DATABASE_URL": secret,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+    }
+    result = subprocess.run(
+        ["sh", str(ROOT / "ops/compose_cleanup.sh"), "23"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 23
+    invocation_text = calls.read_text(encoding="utf-8")
+    assert invocation_text.splitlines() == [
+        "compose -f compose.test.yaml ps --all",
+        (
+            "compose -f compose.test.yaml logs --no-color --timestamps --tail=200 "
+            "postgres migrate api web"
+        ),
+        "compose -f compose.test.yaml down -v --remove-orphans",
+    ]
+    assert secret not in result.stdout + result.stderr + invocation_text
+
+    calls.unlink()
+    success = subprocess.run(
+        ["sh", str(ROOT / "ops/compose_cleanup.sh"), "0"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert success.returncode == 0
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "compose -f compose.test.yaml down -v --remove-orphans"
+    ]
+    assert secret not in success.stdout + success.stderr
 
 
 def test_live_workflows_are_manual_secret_guarded_and_upload_safe_outputs() -> None:
