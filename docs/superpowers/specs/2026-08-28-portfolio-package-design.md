@@ -277,7 +277,7 @@ the plan must instead use a manual browser capture with an exact checklist.
 
 - every Markdown link resolves within the branch or to verified public GitHub
   evidence;
-- no `TODO`, `TBD`, placeholder secret, or unsupported measured claim remains;
+- no unfinished marker, placeholder secret, or unsupported measured claim remains;
 - Mermaid blocks use GitHub-compatible syntax;
 - shell commands match repository files and workflows;
 - repository terminology is consistent.
