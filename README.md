@@ -211,14 +211,19 @@ The pull-request CI runs:
 Focused seeder verification:
 
 ```bash
-uv run --project apps/api pytest   demo/test_seed_manifest.py   demo/test_seed_state.py   -q -W error
+uv run --project apps/api pytest \
+  demo/test_seed_manifest.py \
+  demo/test_seed_state.py \
+  -q -W error
 ```
 
 Deterministic benchmark:
 
 ```bash
 cd apps/api
-uv run python -m release_intelligence.benchmark.runner   --catalog ../../benchmarks/scenarios/catalog.yaml   --output ../../benchmark-results.json
+uv run python -m release_intelligence.benchmark.runner \
+  --catalog ../../benchmarks/scenarios/catalog.yaml \
+  --output ../../benchmark-results.json
 ```
 
 The benchmark gate requires at least 95% readiness agreement, 100% critical
