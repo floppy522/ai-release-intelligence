@@ -70,12 +70,19 @@ separate valid Fernet key for `ARI_CREDENTIAL_ENCRYPTION_KEY`; it protects
 stored OAuth credentials. `ARI_GITHUB_PRIVATE_KEY_PEM` must be an RSA private
 key, and the GitHub App and OAuth values must all be non-empty.
 
-AI explanations are optional. Leave every `ARI_OPENAI_*` setting unset to keep
-the provider disabled. If `ARI_OPENAI_API_KEY` is set, both current configured
-input and output token prices are also required. An unavailable optional
-explanation does not change the deterministic readiness assessment. See
-[`.env.example`](../../.env.example) and
-[`config.py`](../../apps/api/src/release_intelligence/config.py).
+Optional AI explanations are unsupported by the current checked-in Compose
+topology: [`compose.yaml`](../../compose.yaml) does not pass any
+`ARI_OPENAI_*` values to the API, and the API image does not receive the root
+`.env` file. The production-style and deterministic Compose procedures in this
+runbook therefore run without an AI provider.
+
+The optional `ARI_OPENAI_*` settings in [`.env.example`](../../.env.example)
+apply only to a separate non-Compose deployment that explicitly injects them
+into the API. In that deployment, leave every `ARI_OPENAI_*` setting unset to
+keep the provider disabled; if `ARI_OPENAI_API_KEY` is set, both current
+configured input and output token prices are also required. An unavailable
+optional explanation does not change the deterministic readiness assessment.
+See [`config.py`](../../apps/api/src/release_intelligence/config.py).
 
 ## Start and verify
 
@@ -178,7 +185,7 @@ raw provider responses into tickets.
 | Host health check or in-container API health check fails after migration succeeds | **API health.** Compare `api` logs with the configuration values and dependency status. Correct the cause, restart, and verify `/healthz` again. |
 | Analysis reports GitHub authorization, incomplete data, or `github.rate_limited` | **GitHub authorization/rate limit.** Verify the App installation, repository scope, and read-only permissions. Wait until the returned reset time for a rate limit, then start a new analysis; do not reuse a partial snapshot. |
 | GitHub login callback returns an authorization or upstream error | **OAuth callback.** Confirm the exact callback URL, client ID/secret, browser origin/port, and upstream query-string log suppression. Preserve only redacted evidence; do not weaken state, cookie, or CSRF protections. |
-| Optional explanation is unavailable | **Optional AI failure.** Check whether the provider is intentionally disabled or its required key/prices are correctly configured. The deterministic assessment remains authoritative; do not treat an explanation outage as a readiness result. |
+| Optional explanation is unavailable | **Optional AI failure.** The checked-in Compose stacks do not support an AI provider. In a separate non-Compose deployment that explicitly injects AI settings, check whether the provider is intentionally disabled and whether its required key/prices are configured. The deterministic assessment remains authoritative; do not treat an explanation outage as a readiness result. |
 
 ## Recovery procedures
 
@@ -189,7 +196,7 @@ Use this order for a failed local run:
    deleting volumes.
 3. Correct configuration or restore upstream availability, such as PostgreSQL,
    GitHub App access, OAuth availability, rate-limit reset, or optional AI
-   configuration.
+   availability in a separately configured non-Compose deployment.
 4. Restart with `up --build -d --wait`, then verify the relevant `/healthz`
    endpoint and service status.
 5. Perform a new analysis run; do not reuse partial state or a result gathered
@@ -201,11 +208,12 @@ stop and escalate first.
 
 ## Credential rotation
 
-Plan rotation with the credential owner and preserve redacted operational
-evidence first. Update the GitHub App private key or OAuth client secret at the
-provider, update the matching `.env` value through the approved secret channel,
-then restart and verify health and an authorized new analysis. Do not commit or
-log old or new credentials.
+Stop before rotating any GitHub App private key or OAuth client secret. Escalate
+to the credential owner and obtain explicit approval for the rotation plan.
+Only after that approval, follow the owner's directed plan: preserve redacted
+operational evidence, update the provider credential and matching deployment
+secret through the approved secret channel, then restart and verify health and
+an authorized new analysis. Do not commit or log old or new credentials.
 
 `ARI_CREDENTIAL_ENCRYPTION_KEY` has a different recovery boundary: existing
 OAuth credentials in PostgreSQL were encrypted with the current Fernet key.
