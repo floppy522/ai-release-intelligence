@@ -320,6 +320,10 @@ verified; human time savings and external adoption remain unvalidated.
 - [Original approved design](docs/superpowers/specs/2026-08-07-ai-release-intelligence-design.md)
 - [Implementation plan](docs/superpowers/plans/2026-08-28-portfolio-package.md)
 
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
 ## Author
 
 Product direction and implementation by
