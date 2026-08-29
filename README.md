@@ -264,14 +264,21 @@ requirements.
 - Measured human-vs-tool time savings and production-scale performance results
   are not yet available.
 
+The public demo evidence is synthetic. CI and the demo repository topology are
+verified; human time savings and external adoption remain unvalidated.
+
 ## Documentation
 
-- [Design specification](docs/superpowers/specs/2026-08-07-ai-release-intelligence-design.md)
-- [Implementation plan](docs/superpowers/plans/2026-08-07-ai-release-intelligence.md)
-- [Benchmark methodology](benchmarks/README.md)
-- [Environment template](.env.example)
-- [CI workflow](.github/workflows/ci.yml)
-- [Live GitHub smoke workflow](.github/workflows/live-github-smoke.yml)
+- [Product case](docs/portfolio/product-case.md)
+- [Architecture](docs/portfolio/architecture.md)
+- [Threat model](docs/portfolio/threat-model.md)
+- [Operations runbook](docs/portfolio/operations-runbook.md)
+- [Benchmark evidence](docs/portfolio/benchmark-results.md)
+- [ADR 0001: Deterministic readiness core](docs/adr/0001-deterministic-readiness-core.md)
+- [ADR 0002: Modular monolith](docs/adr/0002-modular-monolith.md)
+- [ADR 0003: Fingerprinted human decisions](docs/adr/0003-fingerprinted-human-decisions.md)
+- [Original approved design](docs/superpowers/specs/2026-08-07-ai-release-intelligence-design.md)
+- [Implementation plan](docs/superpowers/plans/2026-08-28-portfolio-package.md)
 
 ## Author
 
