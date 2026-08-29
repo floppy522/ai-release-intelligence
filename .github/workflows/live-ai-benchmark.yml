@@ -1,0 +1,50 @@
+name: Live AI benchmark
+
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-ai-benchmark
+  cancel-in-progress: false
+
+jobs:
+  live-ai-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: live-smoke
+    env:
+      OPENAI_API_KEY: ${{ secrets.ARI_OPENAI_API_KEY }}
+      OPENAI_MODEL: gpt-5.6
+      ARI_OPENAI_INPUT_COST_PER_MILLION: ${{ secrets.ARI_OPENAI_INPUT_COST_PER_MILLION }}
+      ARI_OPENAI_OUTPUT_COST_PER_MILLION: ${{ secrets.ARI_OPENAI_OUTPUT_COST_PER_MILLION }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+      - name: Synchronize locked API dependencies
+        working-directory: apps/api
+        run: uv sync --locked
+      - name: Run all 44 cases through the grounded Task 13 boundary
+        working-directory: apps/api
+        run: |
+          set -euo pipefail
+          test -n "$OPENAI_API_KEY"
+          test "$OPENAI_MODEL" = "gpt-5.6"
+          test -n "$ARI_OPENAI_INPUT_COST_PER_MILLION"
+          test -n "$ARI_OPENAI_OUTPUT_COST_PER_MILLION"
+          uv run python -m release_intelligence.benchmark.live_ai \
+            --catalog ../../benchmarks/scenarios/catalog.yaml \
+            --output "${RUNNER_TEMP}/live-ai-aggregate.json"
+      - name: Upload aggregate metrics only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: live-ai-aggregate
+          path: ${{ runner.temp }}/live-ai-aggregate.json
+          if-no-files-found: error
+          retention-days: 14

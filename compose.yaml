@@ -1,0 +1,94 @@
+x-api-environment: &api-environment
+  ENVIRONMENT: production
+  ARI_DATABASE_URL: postgresql+asyncpg://release_intelligence:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres/release_intelligence
+  DATABASE_URL: postgresql+asyncpg://release_intelligence:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres/release_intelligence
+  ARI_CREDENTIAL_ENCRYPTION_KEY: ${ARI_CREDENTIAL_ENCRYPTION_KEY:?set ARI_CREDENTIAL_ENCRYPTION_KEY}
+  ARI_GITHUB_APP_ID: ${ARI_GITHUB_APP_ID:?set ARI_GITHUB_APP_ID}
+  ARI_GITHUB_PRIVATE_KEY_PEM: ${ARI_GITHUB_PRIVATE_KEY_PEM:?set ARI_GITHUB_PRIVATE_KEY_PEM}
+  ARI_GITHUB_CLIENT_ID: ${ARI_GITHUB_CLIENT_ID:?set ARI_GITHUB_CLIENT_ID}
+  ARI_GITHUB_CLIENT_SECRET: ${ARI_GITHUB_CLIENT_SECRET:?set ARI_GITHUB_CLIENT_SECRET}
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: release_intelligence
+      POSTGRES_USER: release_intelligence
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U release_intelligence -d release_intelligence"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [database]
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    security_opt: ["no-new-privileges:true"]
+
+  migrate:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    command: ["alembic", "-c", "/app/alembic.ini", "upgrade", "head"]
+    environment: *api-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [database]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    security_opt: ["no-new-privileges:true"]
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    environment: *api-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks: [database, edge]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
+    security_opt: ["no-new-privileges:true"]
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        VITE_ENVIRONMENT: production
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${ARI_WEB_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks: [edge]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+      - /var/cache/nginx:rw,noexec,nosuid,size=16m
+      - /var/run:rw,noexec,nosuid,size=1m
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  database:
+    internal: true
+  edge: {}
+
+volumes:
+  postgres_data: {}

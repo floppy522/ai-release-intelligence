@@ -1,0 +1,29 @@
+{
+  "cases": [
+    {
+      "name": "missing_main_pr",
+      "main_pr": null,
+      "expected_rules": ["backmerge.main_pr_required"]
+    },
+    {
+      "name": "merged_main_pr",
+      "main_pr": {"base_ref": "main", "state": "closed", "merged": true},
+      "expected_rules": []
+    },
+    {
+      "name": "open_main_pr",
+      "main_pr": {"base_ref": "main", "state": "open", "merged": false},
+      "expected_rules": ["backmerge.main_pr_required"]
+    },
+    {
+      "name": "unmerged_main_pr",
+      "main_pr": {"base_ref": "main", "state": "closed", "merged": false},
+      "expected_rules": ["backmerge.main_pr_required"]
+    },
+    {
+      "name": "wrong_base_main_pr",
+      "main_pr": {"base_ref": "develop", "state": "closed", "merged": true},
+      "expected_rules": ["backmerge.main_pr_required"]
+    }
+  ]
+}

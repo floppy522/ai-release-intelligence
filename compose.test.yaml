@@ -1,0 +1,92 @@
+x-api-environment: &api-environment
+  ENVIRONMENT: e2e
+  ARI_DATABASE_URL: postgresql+asyncpg://release_intelligence:e2e-only-not-secret@postgres/release_intelligence_test
+  DATABASE_URL: postgresql+asyncpg://release_intelligence:e2e-only-not-secret@postgres/release_intelligence_test
+  ARI_CREDENTIAL_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+  ARI_SESSION_TTL_SECONDS: "3600"
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: release_intelligence_test
+      POSTGRES_USER: release_intelligence
+      POSTGRES_PASSWORD: e2e-only-not-secret
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U release_intelligence -d release_intelligence_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks: [database]
+    volumes:
+      - postgres_test_data:/var/lib/postgresql
+    security_opt: ["no-new-privileges:true"]
+
+  migrate:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    command: ["alembic", "-c", "/app/alembic.ini", "upgrade", "head"]
+    environment: *api-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [database]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    security_opt: ["no-new-privileges:true"]
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    environment: *api-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks: [database, edge]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
+    security_opt: ["no-new-privileges:true"]
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        VITE_ENVIRONMENT: e2e
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:4173:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks: [edge]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+      - /var/cache/nginx:rw,noexec,nosuid,size=16m
+      - /var/run:rw,noexec,nosuid,size=1m
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  database:
+    internal: true
+  edge: {}
+
+volumes:
+  postgres_test_data: {}

@@ -1,0 +1,71 @@
+name: Task 2 PostgreSQL persistence
+
+on:
+  push:
+    branches:
+      - feature/ai-release-intelligence
+      - feature/ai-release-intelligence-mvp
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  task-2-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/release_intelligence_test
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: release_intelligence_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d release_intelligence_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+      - name: Synchronize API dependencies
+        working-directory: apps/api
+        run: uv sync --locked
+      - name: Apply PostgreSQL migrations
+        working-directory: apps/api
+        run: uv run alembic upgrade head
+      - name: Run focused PostgreSQL persistence contracts
+        working-directory: apps/api
+        run: >-
+          uv run pytest
+          tests/integration/test_analysis_repository.py
+          tests/integration/test_policy_repository.py
+          -v
+      - name: Run backend test suite
+        working-directory: apps/api
+        run: uv run pytest -v -W error
+      - name: Downgrade PostgreSQL migrations
+        working-directory: apps/api
+        run: uv run alembic downgrade base
+      - name: Reapply PostgreSQL migrations
+        working-directory: apps/api
+        run: uv run alembic upgrade head
+      - name: Verify policy contracts after migration round-trip
+        working-directory: apps/api
+        run: uv run pytest tests/integration/test_policy_repository.py -v
+      - name: Lint backend
+        working-directory: apps/api
+        run: uv run ruff check src tests
+      - name: Type-check backend
+        working-directory: apps/api
+        run: uv run mypy
