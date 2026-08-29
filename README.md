@@ -78,6 +78,17 @@ The public
 repository contains fictional release evidence only. It has no customer data,
 real incidents, credentials, or proprietary material.
 
+### Demo walkthrough
+
+#### 1. Configure the release
+![Release setup with demo repository, milestone, and candidate branch](docs/portfolio/assets/01-release-setup.png)
+
+#### 2. Review an advisory failure
+![Needs-decision report with advisory CI evidence](docs/portfolio/assets/02-needs-decision.png)
+
+#### 3. Record a human decision
+![Ready report after a documented accepted-risk decision](docs/portfolio/assets/03-ready-after-decision.png)
+
 The reconciled fixture includes:
 
 - release branches for `2026-08-03` and `2026-08-10`;
