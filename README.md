@@ -173,9 +173,9 @@ docker compose -f compose.test.yaml up --build -d --wait
 Open [http://127.0.0.1:4173](http://127.0.0.1:4173), then:
 
 1. Select **Use demo repository**.
-2. Choose milestone `Release 2026.08.10` and candidate branch
-   `release/2026-08-10`.
-3. Run the analysis and observe `NEEDS_DECISION`.
+2. Select milestone `Release 2026.08.10` (fixture value `7`) and candidate
+   branch `release/2026-08-10`.
+3. Select **Run analysis** and observe `NEEDS_DECISION`.
 4. Select **Accept risk**, enter a reason, confirm the decision, and record it.
    The assessment changes to `READY`.
 
