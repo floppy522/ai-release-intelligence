@@ -32,8 +32,7 @@ answering the same questions:
 
 The experience-based baseline behind this project is 30–60 minutes for a manual
 review. The product target is an evidence-backed decision in no more than five
-minutes, but that time-saving hypothesis has not yet been validated through
-external user research.
+minutes.
 
 ## What the MVP does
 
