@@ -10,8 +10,10 @@ Release readiness is a Go/No-Go decision that must be reproducible and
 auditable from the release evidence. The application normalizes a bounded
 GitHub evidence window into an immutable `ReleaseSnapshot`, then the domain
 assesses that snapshot against a configured policy and valid human decisions.
-The assessment applies fixed precedence for insufficient data, blocking
-findings, and decisions; it does not call external providers.
+The assessment also receives an evaluation time and fails closed when its
+snapshot is stale or temporally invalid. It applies fixed precedence for
+insufficient data, blocking findings, and decisions; it does not call external
+providers.
 
 An optional AI explanation is useful for helping a reviewer understand the
 stored report, but a model response is probabilistic and can be unavailable,
@@ -21,16 +23,23 @@ and persistence, and validates its references before returning it.
 
 ## Decision
 
-Identical normalized snapshot, policy, and valid human decisions must produce
-identical readiness. Deterministic domain rules remain the sole authority for
-release status, finding severity, evidence, and whether an advisory finding is
-accepted. AI may explain the supplied deterministic report, but it cannot set
-status, severity, evidence, or acceptance.
+For an identical normalized snapshot, policy, valid human decisions, and
+evaluation time/freshness context, deterministic rules must produce identical
+readiness. The evaluation time is an authoritative input because a snapshot
+that is fresh for one evaluation can later become `INSUFFICIENT_DATA`.
+Deterministic domain rules remain the sole authority for release status,
+finding severity, evidence, and whether an advisory finding is accepted. AI
+may explain the supplied deterministic report, but it cannot set status,
+severity, evidence, or acceptance.
 
 ## Consequences
 
 - Release outcomes can be reproduced from the persisted snapshot, policy
-  version, findings, evidence, and valid decision history.
+  version, findings, evidence, valid decision history, and the evaluation
+  time/freshness context used for the result.
+- A stored `READY` assessment is not permanently valid: a later evaluation
+  correctly becomes `INSUFFICIENT_DATA` when the immutable source window is
+  stale, requiring a fresh analysis rather than reusing old evidence.
 - Rule behaviour and status precedence can be unit-tested without model calls,
   network availability, or prompt variance.
 - AI output is constrained to a non-authoritative explanation; an unavailable
