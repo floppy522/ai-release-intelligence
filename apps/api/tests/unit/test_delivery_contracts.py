@@ -18,6 +18,21 @@ def _yaml(path: str) -> dict[str, object]:
     return value
 
 
+def test_required_workflows_run_on_mvp_branch_push() -> None:
+    for path in (".github/workflows/ci.yml", ".github/workflows/task-2-postgres.yml"):
+        workflow = yaml.load(
+            (ROOT / path).read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+        )
+        assert isinstance(workflow, dict)
+        triggers = workflow["on"]
+        assert isinstance(triggers, dict)
+        push = triggers["push"]
+        assert isinstance(push, dict)
+        branches = push["branches"]
+        assert isinstance(branches, list)
+        assert "feature/ai-release-intelligence-mvp" in branches
+
+
 def test_compose_isolated_stack_uses_healthy_non_writable_services() -> None:
     document = _yaml("compose.test.yaml")
     services = document["services"]

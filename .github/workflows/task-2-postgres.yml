@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/ai-release-intelligence
+      - feature/ai-release-intelligence-mvp
   pull_request:
     branches:
       - main

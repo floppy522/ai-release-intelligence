@@ -3,7 +3,7 @@ name: CI
 'on':
   pull_request:
   push:
-    branches: [main, feature/ai-release-intelligence]
+    branches: [main, feature/ai-release-intelligence, feature/ai-release-intelligence-mvp]
 
 permissions:
   contents: read
