@@ -129,6 +129,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Run persisted vertical release scenario
         env:
+          CAPTURE_PORTFOLIO_SCREENSHOTS: '1'
           E2E_BASE_URL: http://127.0.0.1:4173
         run: |
           set -euo pipefail
@@ -148,6 +149,13 @@ jobs:
             pnpm exec playwright install --with-deps chromium
             pnpm exec playwright test
           )
+      - name: Upload portfolio screenshots
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: portfolio-screenshots
+          path: tests/e2e/test-results/portfolio
+          if-no-files-found: error
+          retention-days: 7
 
   docker-smoke:
     runs-on: ubuntu-latest

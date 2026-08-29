@@ -191,6 +191,37 @@ def test_playwright_ci_resolves_pnpm_from_e2e_package_context() -> None:
     assert "pnpm --dir tests/e2e" not in run_scripts
 
 
+def test_playwright_ci_publishes_portfolio_screenshot_artifact() -> None:
+    workflow = _yaml(".github/workflows/ci.yml")
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    job = jobs["playwright-e2e"]
+    assert isinstance(job, dict)
+    steps = job["steps"]
+    assert isinstance(steps, list)
+
+    scenario_step = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and step.get("name") == "Run persisted vertical release scenario"
+    )
+    assert scenario_step["env"]["CAPTURE_PORTFOLIO_SCREENSHOTS"] == "1"
+
+    upload_step = next(
+        step
+        for step in steps
+        if isinstance(step, dict)
+        and str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    )
+    assert upload_step["with"] == {
+        "name": "portfolio-screenshots",
+        "path": "tests/e2e/test-results/portfolio",
+        "if-no-files-found": "error",
+        "retention-days": 7,
+    }
+
+
 def test_compose_cleanup_reports_bounded_logs_without_dumping_secrets(
     tmp_path: Path,
 ) -> None:
