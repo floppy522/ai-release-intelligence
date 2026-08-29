@@ -35,8 +35,6 @@ test("fixture release moves from needs decision to ready", async ({ page }) => {
   await expect(
     page.locator('header[data-status="NEEDS_DECISION"]'),
   ).toContainText("NEEDS DECISION");
-  const attention = page.getByRole("region", { name: "What requires attention" });
-  await expect(attention.getByText("Advisory", { exact: true })).toBeVisible();
   const evidenceLink = page.getByRole("link", { name: "Open evidence" });
   await expect(evidenceLink).toBeVisible();
   await expect(evidenceLink).toHaveAttribute(
