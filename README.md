@@ -157,6 +157,35 @@ ops/            Smoke-test and Compose cleanup utilities
 tests/e2e/      Persisted browser-level release-readiness scenario
 ```
 
+## Try it in five minutes
+
+The deterministic demo stack exercises the core decision flow with synthetic
+fixture data. It requires Docker Compose v2, but no GitHub App, OAuth, or OpenAI
+credentials.
+
+```bash
+git clone https://github.com/floppy522/ai-release-intelligence.git
+cd ai-release-intelligence
+docker compose -f compose.test.yaml config --quiet
+docker compose -f compose.test.yaml up --build -d --wait
+```
+
+Open [http://127.0.0.1:4173](http://127.0.0.1:4173), then:
+
+1. Select **Use demo repository**.
+2. Select milestone `Release 2026.08.10` (fixture value `7`) and candidate
+   branch `release/2026-08-10`.
+3. Select **Run analysis** and observe `NEEDS_DECISION`.
+4. Select **Accept risk**, enter a reason, confirm the decision, and record it.
+   The assessment changes to `READY`.
+
+This stack uses a deterministic fixture rather than live GitHub API access. Stop
+it without deleting the PostgreSQL volume:
+
+```bash
+docker compose -f compose.test.yaml down
+```
+
 ## Run locally
 
 ### Prerequisites
