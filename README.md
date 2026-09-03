@@ -1,11 +1,31 @@
 # AI Release Intelligence
 
+[![CI](https://github.com/floppy522/ai-release-intelligence/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/floppy522/ai-release-intelligence/actions/workflows/ci.yml?query=branch%3Amain)
+[![Release](https://img.shields.io/github/v/release/floppy522/ai-release-intelligence?display_name=tag)](https://github.com/floppy522/ai-release-intelligence/releases/tag/v0.1.0)
+[![License](https://img.shields.io/github/license/floppy522/ai-release-intelligence)](LICENSE)
+
 **Evidence-backed Go/No-Go decision support for GitHub-native releases.**
 
-AI Release Intelligence turns one GitHub Milestone and one release-candidate
-branch into a deterministic readiness assessment. It reconciles release scope,
-pull requests, CI checks, blockers, operational actions, migrations, and
-back-merges, then presents a prioritized report with direct links to evidence.
+## At a glance
+
+| | |
+| --- | --- |
+| **For** | Release Managers and Technical Project Managers in small GitHub-native teams |
+| **Problem** | Release reviewers manually reconcile issues, PRs, CI, blockers, operational actions, migrations, and back-merges |
+| **Product** | Deterministic, evidence-linked Go/No-Go decision support with governed human risk decisions |
+| **My role** | Problem framing, MVP scope, product and technical decisions, acceptance criteria, release policy, verification, and release management |
+| **Verified evidence** | `v0.1.0`, public synthetic demo, passing CI, browser E2E coverage, and a versioned 44-scenario deterministic benchmark |
+
+Implementation was supported by AI coding agents through specification-driven,
+test-driven, and review-gated workflows. I remained accountable for scope,
+trade-offs, verification, and release readiness.
+
+**Quick links:** [Try in five minutes](#try-it-in-five-minutes) ·
+[Product case](docs/portfolio/product-case.md) ·
+[Architecture](docs/portfolio/architecture.md) ·
+[Release v0.1.0](https://github.com/floppy522/ai-release-intelligence/releases/tag/v0.1.0)
+
+![Release-readiness report requiring a governed human decision](docs/portfolio/assets/02-needs-decision.png)
 
 The LLM is deliberately outside the decision path:
 
@@ -13,9 +33,6 @@ The LLM is deliberately outside the decision path:
 GitHub data → normalized snapshot → deterministic findings
             → human decisions → readiness status → optional AI explanation
 ```
-
-The product is designed for Release Managers and Technical Project Managers in
-small teams that run planned releases from GitHub.
 
 ## Why this project exists
 
@@ -325,5 +342,10 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Author
 
-Product direction and implementation by
-[Valeriy Malov](https://github.com/floppy522).
+**[Valeriy Malov](https://github.com/floppy522)** — Technical Project Manager
+with delivery, release-management, and technical product depth.
+
+I owned the problem framing, requirements, MVP scope, product and technical
+decisions, acceptance criteria, release policy, verification, and release
+management. Implementation was completed with AI coding agents through
+specification-driven, test-driven, and review-gated workflows.
