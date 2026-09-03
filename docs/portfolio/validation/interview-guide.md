@@ -1,5 +1,8 @@
 # External Validation Interview Guide
 
+**Status:** Retained for future use. External validation is paused and no
+interviews are currently scheduled.
+
 ## Purpose and session shape
 
 Use this guide for 30-40 minute interviews with practitioners who participate

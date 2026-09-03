@@ -2,16 +2,19 @@
 
 ## Status and scope
 
+**Research status:** Paused as of 2026-09-03
+
 **Evidence status:** Unvalidated
 
 **Product version at research start:** `v0.1.0`
 
-**Research start:** 2026-09-03
+**Framework created:** 2026-09-03
 
-This study tests whether the release-readiness problem and the current AI
-Release Intelligence (ARI) workflow generalize beyond the author's own
-release-management experience. It is designed to find disconfirming evidence
-as well as supporting evidence.
+No recruitment or fieldwork is currently scheduled. If research resumes, this
+plan will test whether the release-readiness problem and the current AI Release
+Intelligence (ARI) workflow generalize beyond the author's own
+release-management experience. It is designed to find disconfirming evidence as
+well as supporting evidence.
 
 The repository's current public claims remain unchanged. The
 [README](../../../README.md) and [product case](../product-case.md) already
@@ -25,7 +28,7 @@ Every note, synthesis, metric, and public claim must use one of these classes:
 
 | Class | Meaning |
 | --- | --- |
-| **Verified** | Directly observed, recorded with consent, or reproducibly measured. |
+| **Verified** | Directly observed or reproducibly measured. |
 | **Self-reported** | Stated by a participant but not independently observed. |
 | **Target** | A desired future outcome or decision threshold. |
 | **Unvalidated** | Not yet supported by external evidence. |
@@ -145,15 +148,17 @@ five-minute target before measuring actual behavior.
 
 | Measure | Definition | Evidence class |
 | --- | --- | --- |
-| Self-reported active review time | Participant's estimate for the last actual review; record range if uncertain. | Self-reported |
-| Observed active review time | Clocked participant activity from review start to stated decision and required actions, excluding separately logged waiting. | Verified |
-| Evidence surfaces | Distinct pages, views, tools, or systems used to reach the decision. | Verified when observed; otherwise Self-reported |
-| Manual reconciliation | A human comparison or interpretation of two or more evidence items not already resolved by a trusted decision surface. | Verified when observed; otherwise Self-reported |
-| Critical-blocker recall | Correctly identified ground-truth critical blockers divided by all ground-truth critical blockers. | Verified |
-| False blockers | Non-blocking ground-truth items incorrectly classified as release blockers. | Verified |
-| Evidence coverage | Required ground-truth checks for which the participant identifies sufficient supporting evidence, divided by all required checks. | Verified |
-| Decision confidence | Participant rating from 1 (not confident) to 5 (fully confident), collected after each scenario. | Self-reported |
-| Decision-support acceptance | `Yes`, `Yes, with manual verification`, or `No` after using the report. | Self-reported |
+| Reported time | Last-review estimate or range. | Self-reported |
+| Observed time | Clocked review minus logged waiting. | Verified |
+| Evidence surfaces | Distinct tools or pages used. | Verified if observed |
+| Reconciliation | Human comparison of evidence. | Verified if observed |
+| Blocker recall | True blockers found divided by all blockers. | Verified |
+| False blockers | Non-blockers treated as release blockers. | Verified |
+| Evidence coverage | Supported checks divided by required checks. | Verified |
+| Decision confidence | Post-scenario rating from 1 to 5. | Self-reported |
+| Report acceptance | `Yes`, `With verification`, or `No`. | Self-reported |
+
+Recalled surface counts and reconciliation steps are **Self-reported**.
 
 Waiting time, total elapsed release lead time, and active review time must be
 reported separately.
@@ -211,7 +216,7 @@ Recommend a meaningful product change only when it is supported by repeated
 evidence from multiple participants or by one high-severity flaw that invalidates
 a core workflow assumption. Each accepted change must trace:
 
-`research evidence -> implication -> product decision -> issue -> PR -> verification -> release`
+`evidence -> implication -> decision -> issue -> PR -> verification -> release`
 
 Mentions of integrations, notifications, or broader scope are not sufficient by
 themselves. Jira, GitLab, Bitbucket, multi-repository releases, notifications,

@@ -97,7 +97,7 @@ and [release operations issue](https://github.com/floppy522/ai-release-intellige
 | --- | --- |
 | Verified | implementation, CI, demo topology, workflow jobs |
 | Target | correctness thresholds, five-minute outcome |
-| Unvalidated | adoption, demand, willingness to pay, measured human time saving |
+| Unvalidated | adoption, demand, pricing, or measured time savings |
 
 The implementation, CI, synthetic-demo topology, and workflow jobs are
 verifiable project evidence. Configured correctness thresholds and the
@@ -115,11 +115,14 @@ acceptance remains a governance decision; the product does not automate release
 authority. Measured human-vs-tool time savings and production-scale performance
 results are not yet available.
 
-## Next validation steps
+## External validation status
 
-Run structured discovery interviews with Release Managers and Technical Project
-Managers in small GitHub-native teams to test the workflow, language, and
-decision needs. Then observe comparable manual and product-assisted release
-reviews, measuring elapsed human review time and correctness against an agreed
-evidence set. Use those results to decide whether the five-minute target,
-product scope, and willingness-to-pay hypothesis merit further investment.
+External validation is paused. A reusable [research framework](validation/)
+and a compact summary of four internal exploratory interviews are retained for
+future use. The summaries are self-reported, do not meet the current research
+protocol, and do not establish adoption, time savings, or product usefulness.
+
+If research resumes, the next step is structured discovery with eligible
+Release Managers and Technical Project Managers, followed only when warranted
+by observed workflows and controlled comparisons. Until then, the five-minute
+goal, external problem fit, and human-review outcome remain unvalidated.
