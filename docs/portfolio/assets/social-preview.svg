@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">AI Release Intelligence social preview</title>
+  <desc id="desc">AI Release Intelligence title beside a synthetic NEEDS_DECISION release-readiness report.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#172235"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#020617" flood-opacity=".45"/>
+    </filter>
+    <clipPath id="screen-clip">
+      <rect x="520" y="56" width="700" height="528" rx="18"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#background)"/>
+  <rect x="64" y="128" width="6" height="172" rx="3" fill="#d4a33a"/>
+
+  <g font-family="DejaVu Sans, Arial, sans-serif" fill="#f8fafc">
+    <text x="96" y="178" font-size="62" font-weight="700" letter-spacing="-2">AI Release</text>
+    <text x="96" y="248" font-size="62" font-weight="700" letter-spacing="-2">Intelligence</text>
+    <text x="96" y="316" font-size="25" font-weight="400" fill="#cbd5e1">Evidence-backed Go/No-Go</text>
+    <text x="96" y="352" font-size="25" font-weight="400" fill="#cbd5e1">decision support</text>
+  </g>
+
+  <rect x="518" y="54" width="704" height="532" rx="20" fill="#ffffff" stroke="#334155" stroke-width="2" filter="url(#shadow)"/>
+  <g clip-path="url(#screen-clip)">
+    <svg x="520" y="56" width="700" height="528" viewBox="216 20 1008 760" preserveAspectRatio="xMidYMid slice">
+      <image xlink:href="02-needs-decision.png" x="0" y="0" width="1440" height="1024"/>
+    </svg>
+  </g>
+</svg>
