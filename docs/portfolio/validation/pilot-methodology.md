@@ -2,7 +2,7 @@
 
 ## Status and objective
 
-**Pilot status:** Not started
+**Pilot status:** Paused; no runs are scheduled
 
 **Outcome hypothesis:** Unvalidated
 
